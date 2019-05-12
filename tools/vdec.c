@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,9 +44,13 @@
 
 #include <futils/futils.h>
 #include <h264/h264.h>
-#include <video-buffers/vbuf.h>
-#include <video-buffers/vbuf_generic.h>
+#include <h265/h265.h>
+#include <libpomp.h>
+#include <media-buffers/mbuf_coded_video_frame.h>
+#include <media-buffers/mbuf_mem_generic.h>
+#include <media-buffers/mbuf_raw_video_frame.h>
 #include <video-decode/vdec.h>
+#include <video-raw/vraw.h>
 #define ULOG_TAG vdec_prog
 #include <ulog.h>
 ULOG_DECLARE_TAG(vdec_prog);
@@ -57,10 +62,24 @@ ULOG_DECLARE_TAG(vdec_prog);
 #	include <bcm_host.h>
 #endif /* RASPI */
 
+/* Win32 stubs */
+#ifdef _WIN32
+static inline const char *strsignal(int signum)
+{
+	return "??";
+}
+#endif /* _WIN32 */
+
 
 #define DEFAULT_IN_BUF_COUNT 10
 #define DEFAULT_IN_BUF_CAPACITY (3840 * 2160 * 3 / 4)
 #define DEFAULT_TS_INC 33333
+
+
+union nalu_type {
+	enum h264_nalu_type h264;
+	enum h265_nalu_type h265;
+};
 
 
 struct vdec_prog {
@@ -72,87 +91,70 @@ struct vdec_prog {
 	int in_fd;
 #endif
 	void *in_data;
-	size_t in_size;
-	struct h264_reader *reader;
+	size_t in_len;
+	size_t in_off;
+	struct pomp_loop *loop;
+	union {
+		struct h264_reader *h264;
+		struct h265_reader *h265;
+	} reader;
 	struct vdec_decoder *decoder;
 	struct vdec_config config;
 	int configured;
-	int first_in_frame;
-	int first_out_frame;
-	int flushed;
+	int finishing;
 	int stopped;
+	int last_in_frame;
+	int first_out_frame;
+	int input_finished;
+	int output_finished;
 	unsigned int input_count;
+	unsigned int output_count;
+	unsigned int au_index;
+	unsigned int start_index;
 	unsigned int max_count;
+	size_t total_bytes;
+	uint8_t *vps;
+	size_t vps_size;
 	uint8_t *sps;
 	size_t sps_size;
 	uint8_t *pps;
 	size_t pps_size;
+	unsigned int decimation;
+	struct vdef_frac framerate;
 	uint64_t ts_inc;
-	int sps_frame_mbs_only_flag;
-	uint32_t sps_pic_order_cnt_type;
-	struct h264_nalu_header prev_slice_nalu_header;
-	struct h264_slice_header prev_slice_header;
-	int first_vcl_nalu;
-	int prev_vcl_nalu;
-	struct vdec_input_metadata in_meta;
-	struct vbuf_pool *in_pool;
+	struct vdef_coded_frame in_info;
+	struct mbuf_pool *in_pool;
 	int in_pool_allocated;
-	struct vbuf_queue *in_queue;
-	struct vbuf_buffer *in_buf;
+	struct mbuf_coded_video_frame_queue *in_queue;
+	struct mbuf_mem *in_mem;
+	size_t in_mem_offset;
+	struct mbuf_coded_video_frame *in_frame;
+	struct vraw_writer *writer;
+	struct vraw_writer_config writer_cfg;
 	char *output_file;
-	FILE *out_file;
-	int output_file_y4m;
-	pthread_mutex_t mutex;
-	pthread_cond_t cond;
+	uint8_t *pending_nalu;
+	size_t pending_nalu_len;
+	union nalu_type pending_nalu_type;
+	struct {
+		struct vraw_reader *reader;
+		struct vdef_raw_format src_format;
+		unsigned int start_index;
+		char *src;
+		uint8_t *src_data;
+		size_t src_data_len;
+		char *csv;
+		FILE *csv_file;
+		double psnr_sum[3];
+	} psnr;
 };
 
 
-static const char short_options[] = "hi:o:n:slj:";
+static struct vdec_prog *s_self;
+static int s_stopping;
 
 
-static const struct option long_options[] = {
-	{"help", no_argument, NULL, 'h'},
-	{"infile", required_argument, NULL, 'i'},
-	{"outfile", required_argument, NULL, 'o'},
-	{"count", required_argument, NULL, 'n'},
-	{"sync", no_argument, NULL, 's'},
-	{"low-delay", no_argument, NULL, 'l'},
-	{"threads", required_argument, NULL, 'j'},
-	{0, 0, 0, 0},
-};
-
-
-static void welcome(char *prog_name)
-{
-	printf("\n%s - Video decoding program\n"
-	       "Copyright (c) 2017 Parrot Drones SAS\n\n",
-	       prog_name);
-}
-
-
-static void usage(char *prog_name)
-{
-	printf("Usage: %s [options]\n"
-	       "Options:\n"
-	       "  -h | --help                        "
-	       "Print this message\n"
-	       "  -i | --infile <file_name>          "
-	       "H.264 Annex B byte stream input file (.264/.h264)\n"
-	       "  -o | --outfile <file_name>         "
-	       "YUV output file\n"
-	       "  -n | --count <n>                   "
-	       "Decode at most n frames\n"
-	       "  -s | --sync                        "
-	       "Use the synchronized decoding mode\n"
-	       "  -l | --low-delay                   "
-	       "Favor low delay decoding\n"
-	       "  -j | --threads <thread_count>      "
-	       "Preferred decoding thread count (0 = default,\n"
-	       "                                     "
-	       "1 = no multi-threading, >1 = multi-threading)\n"
-	       "\n",
-	       prog_name);
-}
+static void au_parse_idle(void *userdata);
+static void pool_event_cb(struct pomp_evt *evt, void *userdata);
 
 
 static void unmap_file(struct vdec_prog *self)
@@ -170,7 +172,7 @@ static void unmap_file(struct vdec_prog *self)
 #else
 	if (self->in_fd >= 0) {
 		if (self->in_data != NULL)
-			munmap(self->in_data, self->in_size);
+			munmap(self->in_data, self->in_len);
 		self->in_data = NULL;
 		close(self->in_fd);
 		self->in_fd = -1;
@@ -184,6 +186,7 @@ static int map_file(struct vdec_prog *self)
 	int res;
 
 #ifdef _WIN32
+	BOOL ret;
 	LARGE_INTEGER filesize;
 
 	self->in_file = CreateFileA(self->input_file,
@@ -207,13 +210,13 @@ static int map_file(struct vdec_prog *self)
 		goto error;
 	}
 
-	res = GetFileSizeEx(self->in_file, &filesize);
-	if (res == 0) {
+	ret = GetFileSizeEx(self->in_file, &filesize);
+	if (ret == FALSE) {
 		res = -EIO;
 		ULOG_ERRNO("GetFileSizeEx('%s')", -res, self->input_file);
 		goto error;
 	}
-	self->in_size = filesize.QuadPart;
+	self->in_len = filesize.QuadPart;
 
 	self->in_data =
 		MapViewOfFile(self->in_file_map, FILE_MAP_READ, 0, 0, 0);
@@ -232,15 +235,15 @@ static int map_file(struct vdec_prog *self)
 	}
 
 	/* Get size and map it */
-	self->in_size = lseek(self->in_fd, 0, SEEK_END);
-	if (self->in_size == (size_t)-1) {
+	self->in_len = lseek(self->in_fd, 0, SEEK_END);
+	if (self->in_len == (size_t)-1) {
 		res = -errno;
 		ULOG_ERRNO("lseek", -res);
 		goto error;
 	}
 
 	self->in_data = mmap(
-		NULL, self->in_size, PROT_READ, MAP_PRIVATE, self->in_fd, 0);
+		NULL, self->in_len, PROT_READ, MAP_PRIVATE, self->in_fd, 0);
 	if (self->in_data == MAP_FAILED) {
 		res = -errno;
 		ULOG_ERRNO("mmap", -res);
@@ -259,50 +262,94 @@ error:
 static int configure(struct vdec_prog *self)
 {
 	int res, buf_count;
-	struct vbuf_cbs buf_cbs;
 
-	res = vdec_set_sps_pps(self->decoder,
-			       self->sps,
-			       self->sps_size,
-			       self->pps,
-			       self->pps_size,
-			       VDEC_INPUT_FORMAT_RAW_NALU);
-	if (res < 0) {
-		ULOG_ERRNO("vdec_set_sps_pps", -res);
-		return res;
+	switch (self->config.encoding) {
+	case VDEF_ENCODING_H264: {
+		res = vdec_set_h264_ps(self->decoder,
+				       self->sps,
+				       self->sps_size,
+				       self->pps,
+				       self->pps_size,
+				       &vdef_h264_raw_nalu);
+		if (res < 0) {
+			ULOG_ERRNO("vdec_set_h264_ps", -res);
+			return res;
+		}
+		struct h264_info info;
+		res = h264_get_info(self->sps,
+				    self->sps_size,
+				    self->pps,
+				    self->pps_size,
+				    &info);
+		if (res < 0) {
+			ULOG_ERRNO("h264_get_info", -res);
+			return res;
+		}
+		self->framerate.num = info.framerate_num;
+		self->framerate.den = info.framerate_den * self->decimation;
+		break;
+	}
+	case VDEF_ENCODING_H265: {
+		res = vdec_set_h265_ps(self->decoder,
+				       self->vps,
+				       self->vps_size,
+				       self->sps,
+				       self->sps_size,
+				       self->pps,
+				       self->pps_size,
+				       &vdef_h265_raw_nalu);
+		if (res < 0) {
+			ULOG_ERRNO("vec_set_h265_ps", -res);
+			return res;
+		}
+		struct h265_info info;
+		res = h265_get_info(self->vps,
+				    self->vps_size,
+				    self->sps,
+				    self->sps_size,
+				    self->pps,
+				    self->pps_size,
+				    &info);
+
+		if (res < 0) {
+			ULOG_ERRNO("h265_get_info", -res);
+			return res;
+		}
+		self->framerate.num = info.framerate_num;
+		self->framerate.den = info.framerate_den * self->decimation;
+		break;
+	}
+	default:
+		break;
 	}
 
 	/* Input buffer pool */
 	self->in_pool = vdec_get_input_buffer_pool(self->decoder);
 	if (self->in_pool == NULL) {
-		res = vbuf_generic_get_cbs(&buf_cbs);
-		if (res < 0) {
-			ULOG_ERRNO("vbuf_generic_get_cbs", -res);
-			return res;
-		}
 		buf_count = (self->config.preferred_thread_count + 1 >
 			     DEFAULT_IN_BUF_COUNT)
 				    ? self->config.preferred_thread_count + 1
 				    : DEFAULT_IN_BUF_COUNT;
-		res = vbuf_pool_new(buf_count,
+		res = mbuf_pool_new(mbuf_mem_generic_impl,
 				    DEFAULT_IN_BUF_CAPACITY,
 				    0,
-				    &buf_cbs,
+				    MBUF_POOL_SMART_GROW,
+				    buf_count,
+				    "vdec_default_pool",
 				    &self->in_pool);
 		if (res < 0) {
-			ULOG_ERRNO("vbuf_pool_new:input", -res);
+			ULOG_ERRNO("mbuf_pool_new:input", -res);
 			return res;
 		}
 		self->in_pool_allocated = 1;
 	}
 
-	/* Input buffer queue (async decoding only) */
-	if (!self->config.sync_decoding) {
-		self->in_queue = vdec_get_input_buffer_queue(self->decoder);
-		if (self->in_queue == NULL) {
-			ULOG_ERRNO("vdec_get_input_buffer_queue", EPROTO);
-			return res;
-		}
+	/* Input buffer queue */
+	self->in_queue = vdec_get_input_buffer_queue(self->decoder);
+	if (self->in_queue == NULL) {
+		res = -EPROTO;
+		ULOG_ERRNO("vdec_get_input_buffer_queue", -res);
+		return res;
 	}
 
 	self->configured = 1;
@@ -310,190 +357,636 @@ static int configure(struct vdec_prog *self)
 }
 
 
-static int yuv_output(struct vdec_prog *self,
-		      struct vbuf_buffer *out_buf,
-		      struct vdec_output_metadata *out_meta)
+static int au_decode(struct vdec_prog *self)
 {
-	int res = 0, chroma_idx;
-	size_t stride, res1;
-	const uint8_t *data, *ptr;
-	unsigned int i, j;
+	int res = 0, err;
+	ssize_t len;
 
-	if (self->out_file == NULL)
+	if (self->in_frame == NULL)
 		return 0;
 
-	if ((out_buf == NULL) || (out_meta == NULL))
-		return -EINVAL;
+	if (((self->max_count > 0) && (self->input_count >= self->max_count)) ||
+	    (self->finishing))
+		goto cleanup;
 
-	data = vbuf_get_cdata(out_buf);
-	if (data == NULL) {
-		res = -EPROTO;
-		ULOG_ERRNO("vbuf_get_cdata:output", -res);
-		return res;
+
+	res = mbuf_coded_video_frame_finalize(self->in_frame);
+	if (res < 0) {
+		ULOG_ERRNO("mbuf_coded_video_frame_finalize:input", -res);
+		goto cleanup;
 	}
 
-	/* Write YUV4MPEG2 file and frame headers */
-	if (self->output_file_y4m) {
-		if (self->first_out_frame) {
-			fprintf(self->out_file,
-				"YUV4MPEG2 W%d H%d F30:1 Ip A1:1\n",
-				out_meta->crop_width,
-				out_meta->crop_height);
-		}
-		fprintf(self->out_file, "FRAME\n");
+	res = mbuf_coded_video_frame_queue_push(self->in_queue, self->in_frame);
+	if (res < 0) {
+		ULOG_ERRNO("mbuf_coded_video_frame_queue_push:input", -res);
+		goto cleanup;
 	}
+	len = mbuf_coded_video_frame_get_packed_size(self->in_frame);
+	if (len < 0)
+		ULOG_ERRNO("mbuf_coded_video_frame_get_packed_size", (int)-len);
+	else
+		self->total_bytes += len;
+	self->input_count++;
+	self->output_finished = 0;
 
-	/* Write to output file in "I420" format */
-	switch (out_meta->format) {
-	case VDEC_OUTPUT_FORMAT_I420:
-	case VDEC_OUTPUT_FORMAT_YV12:
-		/* Y */
-		ptr = data + out_meta->plane_offset[0];
-		stride = out_meta->plane_stride[0];
-		ptr += out_meta->crop_top * stride + out_meta->crop_left;
-		for (i = 0; i < out_meta->crop_height; i++) {
-			res1 = fwrite(
-				ptr, out_meta->crop_width, 1, self->out_file);
-			if (res1 != 1) {
-				res = -EIO;
-				ULOG_ERRNO("fwrite", -res);
-				return res;
-			}
-			ptr += stride;
-		}
-
-		/* U */
-		chroma_idx =
-			(out_meta->format == VDEC_OUTPUT_FORMAT_I420) ? 1 : 2;
-		ptr = data + out_meta->plane_offset[chroma_idx];
-		stride = out_meta->plane_stride[chroma_idx];
-		ptr += out_meta->crop_top / 2 * stride +
-		       out_meta->crop_left / 2;
-		for (i = 0; i < out_meta->crop_height / 2; i++) {
-			res1 = fwrite(ptr,
-				      out_meta->crop_width / 2,
-				      1,
-				      self->out_file);
-			if (res1 != 1) {
-				res = -EIO;
-				ULOG_ERRNO("fwrite", -res);
-				return res;
-			}
-			ptr += stride;
-		}
-
-		/* V */
-		chroma_idx =
-			(out_meta->format == VDEC_OUTPUT_FORMAT_I420) ? 2 : 1;
-		ptr = data + out_meta->plane_offset[chroma_idx];
-		stride = out_meta->plane_stride[chroma_idx];
-		ptr += out_meta->crop_top / 2 * stride +
-		       out_meta->crop_left / 2;
-		for (i = 0; i < out_meta->crop_height / 2; i++) {
-			res1 = fwrite(ptr,
-				      out_meta->crop_width / 2,
-				      1,
-				      self->out_file);
-			if (res1 != 1) {
-				res = -EIO;
-				ULOG_ERRNO("fwrite", -res);
-				return res;
-			}
-			ptr += stride;
-		}
-		break;
-	case VDEC_OUTPUT_FORMAT_NV12:
-	case VDEC_OUTPUT_FORMAT_NV21:
-		/* Y */
-		ptr = data + out_meta->plane_offset[0];
-		stride = out_meta->plane_stride[0];
-		ptr += out_meta->crop_top * stride + out_meta->crop_left;
-		for (i = 0; i < out_meta->crop_height; i++) {
-			res1 = fwrite(
-				ptr, out_meta->crop_width, 1, self->out_file);
-			if (res1 != 1) {
-				res = -EIO;
-				ULOG_ERRNO("fwrite", -res);
-				return res;
-			}
-			ptr += stride;
-		}
-
-		/* U */
-		chroma_idx =
-			(out_meta->format == VDEC_OUTPUT_FORMAT_NV12) ? 0 : 1;
-		ptr = data + out_meta->plane_offset[1];
-		stride = out_meta->plane_stride[1];
-		ptr += out_meta->crop_top / 2 * stride + out_meta->crop_left;
-		for (i = 0; i < out_meta->crop_height / 2; i++) {
-			for (j = 0; j < out_meta->crop_width / 2; j++) {
-				res1 = fwrite(&ptr[j * 2 + chroma_idx],
-					      1,
-					      1,
-					      self->out_file);
-				if (res1 != 1) {
-					res = -EIO;
-					ULOG_ERRNO("fwrite", -res);
-					return res;
-				}
-			}
-			ptr += stride;
-		}
-
-		/* V */
-		chroma_idx =
-			(out_meta->format == VDEC_OUTPUT_FORMAT_NV12) ? 1 : 0;
-		ptr = data + out_meta->plane_offset[1];
-		stride = out_meta->plane_stride[1];
-		ptr += out_meta->crop_top / 2 * stride + out_meta->crop_left;
-		for (i = 0; i < out_meta->crop_height / 2; i++) {
-			for (j = 0; j < out_meta->crop_width / 2; j++) {
-				res1 = fwrite(&ptr[j * 2 + chroma_idx],
-					      1,
-					      1,
-					      self->out_file);
-				if (res1 != 1) {
-					res = -EIO;
-					ULOG_ERRNO("fwrite", -res);
-					return res;
-				}
-			}
-			ptr += stride;
-		}
-		break;
-	default:
-		ULOGE("unsupported YUV format");
-		res = -ENOSYS;
-		break;
-	}
+cleanup:
+	err = mbuf_coded_video_frame_unref(self->in_frame);
+	if (err < 0)
+		ULOG_ERRNO("mbuf_coded_video_frame_unref:input", -err);
+	self->in_frame = NULL;
+	err = mbuf_mem_unref(self->in_mem);
+	if (err < 0)
+		ULOG_ERRNO("mbuf_mem_unref:input", -err);
+	self->in_mem = NULL;
+	self->in_info.info.index++;
+	self->in_info.info.timestamp += self->ts_inc;
 
 	return res;
 }
 
 
-static int frame_output(struct vdec_prog *self, struct vbuf_buffer *out_buf)
+static int append_to_frame(struct vdec_prog *self,
+			   struct mbuf_coded_video_frame *frame,
+			   struct mbuf_mem *mem,
+			   const uint8_t *data,
+			   size_t len,
+			   union nalu_type type)
 {
-	int res = 0;
-	struct vdec_output_metadata *out_meta;
-	size_t len = 0;
+	int res;
+	size_t au_offset, capacity;
+	size_t nalu_offset = (self->in_info.format.data_format ==
+			      VDEF_CODED_DATA_FORMAT_RAW_NALU)
+				     ? 0
+				     : 4;
+	uint8_t *au_data, *nalu_data;
+	uint32_t start;
 
-	res = vbuf_metadata_get(
-		out_buf, self->decoder, NULL, &len, (uint8_t **)&out_meta);
-	if ((res < 0) || (out_meta == NULL) || (len != sizeof(*out_meta))) {
-		ULOG_ERRNO("vbuf_metadata_get", -res);
+	ULOG_ERRNO_RETURN_ERR_IF(frame == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(mem == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(data == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(len == 0, EINVAL);
+
+	au_offset = self->in_mem_offset;
+	res = mbuf_mem_get_data(mem, (void **)&au_data, &capacity);
+	if (res < 0) {
+		ULOG_ERRNO("mbuf_mem_get_data", -res);
+		return res;
+	}
+	if (capacity < au_offset + nalu_offset + len) {
+		ULOGE("memory too small for frame");
+		return -ENOBUFS;
+	}
+	if (au_data == NULL) {
+		ULOG_ERRNO("mbuf_mem_get_data", EPROTO);
+		return -EPROTO;
+	}
+	nalu_data = au_data + au_offset;
+	switch (self->in_info.format.data_format) {
+	case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
+		start = htonl(0x00000001);
+		memcpy(nalu_data, &start, sizeof(uint32_t));
+		break;
+	case VDEF_CODED_DATA_FORMAT_AVCC:
+		start = htonl(len);
+		memcpy(nalu_data, &start, sizeof(uint32_t));
+		break;
+	default:
+		/* Nothing to do otherwise */
+		break;
+	}
+	memcpy(nalu_data + nalu_offset, data, len);
+	self->in_mem_offset = au_offset + nalu_offset + len;
+
+	struct vdef_nalu nalu = {
+		.size = len + nalu_offset,
+	};
+	switch (self->in_info.format.encoding) {
+	case VDEF_ENCODING_H264:
+		nalu.h264.type = type.h264;
+		break;
+	case VDEF_ENCODING_H265:
+		nalu.h265.type = type.h265;
+		break;
+	default:
+		ULOGE("unsupported encoding %s",
+		      vdef_encoding_to_str(self->in_info.format.encoding));
+		return -EPROTO;
+	}
+	res = mbuf_coded_video_frame_add_nalu(frame, mem, au_offset, &nalu);
+	if (res < 0) {
+		ULOG_ERRNO("mbuf_coded_video_frame_add_nalu", -res);
 		return res;
 	}
 
-	res = yuv_output(self, out_buf, out_meta);
+	return 0;
+}
+
+
+static int au_end(struct vdec_prog *self)
+{
+	int res = 0;
+
+	if ((self->in_frame != NULL) && (self->au_index >= self->start_index)) {
+		res = au_decode(self);
+		if (res < 0)
+			ULOG_ERRNO("au_decode", -res);
+	}
+	self->au_index++;
+
+	return res;
+}
+
+
+static void h264_au_end_cb(struct h264_ctx *ctx, void *userdata)
+{
+	struct vdec_prog *self = userdata;
+	int res = au_end(userdata);
+	if (res < 0) {
+		res = h264_reader_stop(self->reader.h264);
+		if (res < 0)
+			ULOG_ERRNO("h264_reader_stop", -res);
+	}
+}
+
+
+static void h265_au_end_cb(struct h265_ctx *ctx, void *userdata)
+{
+	struct vdec_prog *self = userdata;
+	int res = au_end(userdata);
+	if (res < 0) {
+		res = h265_reader_stop(self->reader.h265);
+		if (res < 0)
+			ULOG_ERRNO("h265_reader_stop", -res);
+	}
+}
+
+
+static void stop_reader(struct vdec_prog *self)
+{
+	int res;
+	switch (self->config.encoding) {
+	case VDEF_ENCODING_H264:
+		res = h264_reader_stop(self->reader.h264);
+		if (res < 0)
+			ULOG_ERRNO("h264_reader_stop", -res);
+		break;
+	case VDEF_ENCODING_H265:
+		res = h265_reader_stop(self->reader.h265);
+		if (res < 0)
+			ULOG_ERRNO("h265_reader_stop", -res);
+		break;
+	default:
+		break;
+	}
+}
+
+
+static void nalu_end(struct vdec_prog *self,
+		     union nalu_type type,
+		     const uint8_t *buf,
+		     size_t len)
+{
+	int res;
+
+	if (self->finishing) {
+		stop_reader(self);
+		return;
+	}
+
+	switch (self->config.encoding) {
+	case VDEF_ENCODING_H264:
+		if ((type.h264 == H264_NALU_TYPE_SPS) && (self->sps == NULL)) {
+			self->sps_size = len;
+			self->sps = malloc(self->sps_size);
+			if (self->sps == NULL) {
+				ULOG_ERRNO("malloc", ENOMEM);
+				return;
+			}
+			memcpy(self->sps, buf, len);
+			ULOGI("SPS found");
+		} else if ((type.h264 == H264_NALU_TYPE_PPS) &&
+			   (self->pps == NULL)) {
+			self->pps_size = len;
+			self->pps = malloc(self->pps_size);
+			if (self->pps == NULL) {
+				ULOG_ERRNO("malloc", ENOMEM);
+				return;
+			}
+			memcpy(self->pps, buf, len);
+			ULOGI("PPS found");
+		}
+		break;
+	case VDEF_ENCODING_H265:
+		if ((type.h265 == H265_NALU_TYPE_VPS_NUT) &&
+		    self->vps == NULL) {
+			self->vps_size = len;
+			self->vps = malloc(self->vps_size);
+			if (self->vps == NULL) {
+				ULOG_ERRNO("malloc", ENOMEM);
+				return;
+			}
+			memcpy(self->vps, buf, len);
+			ULOGI("VPS found");
+		} else if ((type.h265 == H265_NALU_TYPE_SPS_NUT) &&
+			   self->sps == NULL) {
+			self->sps_size = len;
+			self->sps = malloc(self->sps_size);
+			if (self->sps == NULL) {
+				ULOG_ERRNO("malloc", ENOMEM);
+				return;
+			}
+			memcpy(self->sps, buf, len);
+			ULOGI("SPS found");
+		} else if ((type.h265 == H265_NALU_TYPE_PPS_NUT) &&
+			   self->pps == NULL) {
+			self->pps_size = len;
+			self->pps = malloc(self->pps_size);
+			if (self->pps == NULL) {
+				ULOG_ERRNO("malloc", ENOMEM);
+				return;
+			}
+			memcpy(self->pps, buf, len);
+			ULOGI("PPS found");
+		}
+		break;
+	default:
+		break;
+	}
+
+	int ps_ready = 0;
+	switch (self->config.encoding) {
+	case VDEF_ENCODING_H264:
+		ps_ready = (self->sps != NULL) && (self->pps != NULL);
+		break;
+	case VDEF_ENCODING_H265:
+		ps_ready = (self->vps != NULL) && (self->sps != NULL) &&
+			   (self->pps != NULL);
+		break;
+	default:
+		break;
+	}
+
+	/* Configure the decoder */
+	if ((!self->configured) && ps_ready) {
+		res = configure(self);
+		if (res < 0) {
+			ULOG_ERRNO("configure", -res);
+			return;
+		}
+	}
+
+	int is_ps = 0;
+	switch (self->config.encoding) {
+	case VDEF_ENCODING_H264:
+		is_ps = (type.h264 == H264_NALU_TYPE_AUD) ||
+			(type.h264 == H264_NALU_TYPE_SPS) ||
+			(type.h264 == H264_NALU_TYPE_PPS);
+		break;
+	case VDEF_ENCODING_H265:
+		is_ps = (type.h265 == H265_NALU_TYPE_AUD_NUT) ||
+			(type.h265 == H265_NALU_TYPE_VPS_NUT) ||
+			(type.h265 == H265_NALU_TYPE_SPS_NUT) ||
+			(type.h265 == H265_NALU_TYPE_PPS_NUT);
+		break;
+	default:
+		break;
+	}
+
+	/* Start decoding at start_index */
+	if (self->au_index < self->start_index)
+		return;
+
+	/* Filter out VPS, SPS, PPS and AUD */
+	if (is_ps)
+		return;
+
+	/* Get an input buffer (non-blocking) */
+	if ((self->in_pool != NULL) && (self->in_mem == NULL)) {
+		res = mbuf_pool_get(self->in_pool, &self->in_mem);
+		if (res < 0) {
+			if (res != -EAGAIN)
+				ULOG_ERRNO("mbuf_pool_get:input", -res);
+
+			/* Stop the parser */
+			stop_reader(self);
+
+			/* Copy data in a buffer */
+			uint8_t *nalu = realloc(self->pending_nalu, len);
+			if (!nalu)
+				return;
+			self->pending_nalu = nalu;
+			self->pending_nalu_len = len;
+			self->pending_nalu_type = type;
+			memcpy(self->pending_nalu, buf, len);
+			return;
+		}
+		self->in_mem_offset = 0;
+	}
+	if (self->in_mem == NULL)
+		return;
+
+	/* Create the frame */
+	if (self->in_frame == NULL) {
+		res = mbuf_coded_video_frame_new(&self->in_info,
+						 &self->in_frame);
+		if (res < 0) {
+			ULOG_ERRNO("mbuf_coded_video_frame_new:input", -res);
+			return;
+		}
+	}
+
+	/* Add the NALU to the input frame */
+	res = append_to_frame(
+		self, self->in_frame, self->in_mem, buf, len, type);
+	if (res < 0)
+		ULOG_ERRNO("append_to_frame", -res);
+}
+
+
+static void h264_nalu_end_cb(struct h264_ctx *ctx,
+			     enum h264_nalu_type type,
+			     const uint8_t *buf,
+			     size_t len,
+			     const struct h264_nalu_header *nh,
+			     void *userdata)
+{
+	nalu_end(userdata, (union nalu_type){.h264 = type}, buf, len);
+}
+
+
+static void h265_nalu_end_cb(struct h265_ctx *ctx,
+			     enum h265_nalu_type type,
+			     const uint8_t *buf,
+			     size_t len,
+			     const struct h265_nalu_header *nh,
+			     void *userdata)
+{
+	nalu_end(userdata, (union nalu_type){.h265 = type}, buf, len);
+}
+
+
+static const struct h264_ctx_cbs h264_cbs = {
+	.au_end = h264_au_end_cb,
+	.nalu_end = h264_nalu_end_cb,
+};
+
+
+static const struct h265_ctx_cbs h265_cbs = {
+	.au_end = h265_au_end_cb,
+	.nalu_end = h265_nalu_end_cb,
+};
+
+
+static int compute_psnr(struct vdec_prog *self,
+			struct mbuf_raw_video_frame *frame,
+			struct vdef_raw_frame *info,
+			double psnr[4])
+{
+	int res;
+	unsigned int plane_count;
+	struct vraw_frame dec_frame;
+	struct vraw_frame src_frame;
+
+	if (self->psnr.src == NULL)
+		return 0;
+
+	memset(&src_frame, 0, sizeof(src_frame));
+	memset(&dec_frame, 0, sizeof(dec_frame));
+
+	/* Initialize the reader for the source file */
+	if (self->psnr.reader == NULL) {
+		struct vraw_reader_config reader_cfg = {0};
+		reader_cfg.start_index = self->psnr.start_index;
+		reader_cfg.format = self->psnr.src_format;
+		vdef_frame_to_format_info(&info->info, &reader_cfg.info);
+		reader_cfg.info.framerate = self->framerate;
+		if ((strlen(self->psnr.src) > 4) &&
+		    (strcmp(self->psnr.src + strlen(self->psnr.src) - 4,
+			    ".y4m") == 0))
+			reader_cfg.y4m = 1;
+
+		res = vraw_reader_new(
+			self->psnr.src, &reader_cfg, &self->psnr.reader);
+		if (res < 0) {
+			ULOG_ERRNO("vraw_reader_new", -res);
+			return res;
+		}
+
+		res = vraw_reader_get_config(self->psnr.reader, &reader_cfg);
+		if (res < 0) {
+			ULOG_ERRNO("vraw_reader_get_config", -res);
+			return res;
+		}
+
+		self->psnr.src_data_len = reader_cfg.info.resolution.width *
+					  reader_cfg.info.resolution.height *
+					  3 / 2 *
+					  (reader_cfg.format.data_size / 8);
+	}
+
+	if (self->psnr.src_data == NULL) {
+		self->psnr.src_data = malloc(self->psnr.src_data_len);
+		if (self->psnr.src_data == NULL) {
+			res = -ENOMEM;
+			ULOG_ERRNO("malloc", -res);
+			return res;
+		}
+	}
+
+	/* Open CSV file */
+	if ((self->psnr.csv != NULL) && (self->psnr.csv_file == NULL)) {
+		self->psnr.csv_file = fopen(self->psnr.csv, "w");
+		if (self->psnr.csv_file == NULL) {
+			res = -errno;
+			ULOG_ERRNO("fopen", -res);
+			/* try later */
+		}
+	}
+
+	/* Read the source frame */
+	do {
+		res = vraw_reader_frame_read(self->psnr.reader,
+					     self->psnr.src_data,
+					     self->psnr.src_data_len,
+					     &src_frame);
+		if (res < 0) {
+			ULOG_ERRNO("vraw_reader_frame_read", -res);
+			return res;
+		}
+	} while ((src_frame.frame.info.index % self->decimation) ||
+		 (src_frame.frame.info.index / self->decimation !=
+		  info->info.index));
+
+	/* Prepare decoded frame */
+	plane_count = vdef_get_raw_frame_plane_count(&info->format);
+	for (unsigned int i = 0; i < plane_count; i++) {
+		size_t len;
+		res = mbuf_raw_video_frame_get_plane(
+			frame, i, (const void **)&dec_frame.cdata[i], &len);
+		if (res < 0) {
+			ULOG_ERRNO("mbuf_raw_video_frame_get_plane", -res);
+			goto out;
+		}
+	}
+	dec_frame.frame = *info;
+
+	/* Compute the PSNR */
+	res = vraw_compute_psnr(&src_frame, &dec_frame, psnr);
+	if (res < 0) {
+		ULOG_ERRNO("vraw_compute_psnr", -res);
+		return res;
+	}
+
+	if (self->psnr.csv_file != NULL) {
+		fprintf(self->psnr.csv_file,
+			"%u %.3f %.3f %.3f\n",
+			info->info.index,
+			psnr[0],
+			psnr[1],
+			psnr[2]);
+	}
+
+	for (int i = 0; i < 3; i++)
+		self->psnr.psnr_sum[i] += psnr[i];
+out:
+	for (unsigned int i = 0; i < plane_count; i++) {
+		if (dec_frame.cdata[i] == NULL)
+			continue;
+		int err = mbuf_raw_video_frame_release_plane(
+			frame, i, dec_frame.cdata[i]);
+		if (err < 0)
+			ULOG_ERRNO("mbuf_raw_video_frame_release_plane", -err);
+	}
+	return 0;
+}
+
+
+static int yuv_output(struct vdec_prog *self,
+		      struct mbuf_raw_video_frame *out_frame)
+{
+	int res;
+	struct vraw_frame frame;
+	struct vdef_raw_frame info;
+	unsigned int plane_count;
+
+	if (out_frame == NULL)
+		return -EINVAL;
+
+	if (self->output_file == NULL)
+		return 0;
+
+	res = mbuf_raw_video_frame_get_frame_info(out_frame, &info);
+	if (res < 0) {
+		ULOG_ERRNO("mbuf_raw_video_frame_get_frame_info", -res);
+		return res;
+	}
+
+	if (self->writer == NULL) {
+		/* Initialize the writer on first frame */
+		self->writer_cfg.format = info.format;
+		vdef_frame_to_format_info(&info.info, &self->writer_cfg.info);
+		self->writer_cfg.info.framerate = self->framerate;
+		res = vraw_writer_new(
+			self->output_file, &self->writer_cfg, &self->writer);
+		if (res < 0) {
+			ULOG_ERRNO("vraw_writer_new", -res);
+			return res;
+		}
+		char *fmt = vdef_raw_format_to_str(&self->writer_cfg.format);
+		ULOGI("YUV output file format is %s", fmt);
+		free(fmt);
+	}
+
+	plane_count = vdef_get_raw_frame_plane_count(&info.format);
+	for (unsigned int i = 0; i < plane_count; i++) {
+		size_t len;
+		res = mbuf_raw_video_frame_get_plane(
+			out_frame, i, (const void **)&frame.cdata[i], &len);
+		if (res < 0) {
+			ULOG_ERRNO("mbuf_raw_video_frame_get_plane", -res);
+			goto out;
+		}
+	}
+	frame.frame = info;
+
+	/* Write the frame */
+	res = vraw_writer_frame_write(self->writer, &frame);
+	if (res < 0) {
+		ULOG_ERRNO("vraw_writer_frame_write", -res);
+		goto out;
+	}
+
+out:
+	for (unsigned int i = 0; i < plane_count; i++) {
+		if (frame.cdata[i] == NULL)
+			continue;
+		int err = mbuf_raw_video_frame_release_plane(
+			out_frame, i, frame.cdata[i]);
+		if (err < 0)
+			ULOG_ERRNO("mbuf_raw_video_frame_release_plane", -err);
+	}
+	return res;
+}
+
+
+static uint64_t get_timestamp(struct mbuf_raw_video_frame *frame,
+			      const char *key)
+{
+	int res;
+	struct mbuf_ancillary_data *data;
+	uint64_t ts = 0;
+	const void *raw_data;
+	size_t len;
+
+	res = mbuf_raw_video_frame_get_ancillary_data(frame, key, &data);
+	if (res < 0)
+		return 0;
+
+	raw_data = mbuf_ancillary_data_get_buffer(data, &len);
+	if (!raw_data || len != sizeof(ts))
+		goto out;
+	memcpy(&ts, raw_data, sizeof(ts));
+
+out:
+	mbuf_ancillary_data_unref(data);
+	return ts;
+}
+
+
+static int frame_output(struct vdec_prog *self,
+			struct mbuf_raw_video_frame *out_frame)
+{
+	int res = 0;
+	double psnr[4] = {0};
+	uint64_t input_time, dequeue_time, output_time;
+	struct vdef_raw_frame info;
+
+	res = yuv_output(self, out_frame);
 	if (res < 0)
 		ULOG_ERRNO("yuv_output", -res);
 
-	ULOGI("decoded frame #%d (dequeue: %.2fms, decode: %.2fms, "
-	      "overall: %.2fms)",
-	      out_meta->index,
-	      (float)(out_meta->dequeue_time - out_meta->input_time) / 1000.,
-	      (float)(out_meta->output_time - out_meta->dequeue_time) / 1000.,
-	      (float)(out_meta->output_time - out_meta->input_time) / 1000.);
+	input_time = get_timestamp(out_frame, VDEC_ANCILLARY_KEY_INPUT_TIME);
+	dequeue_time =
+		get_timestamp(out_frame, VDEC_ANCILLARY_KEY_DEQUEUE_TIME);
+	output_time = get_timestamp(out_frame, VDEC_ANCILLARY_KEY_OUTPUT_TIME);
+
+	res = mbuf_raw_video_frame_get_frame_info(out_frame, &info);
+	if (res < 0)
+		ULOG_ERRNO("mbuf_raw_video_frame_get_frame_info", -res);
+
+	res = compute_psnr(self, out_frame, &info, psnr);
+	if (res < 0)
+		ULOG_ERRNO("compute_psnr", -res);
+
+	ULOGI("decoded frame #%d, dequeue: %.2fms, decode: %.2fms, "
+	      "overall: %.2fms, PSNR: Y=%.3fdB U=%.3fdB Y=%.3fdB",
+	      info.info.index,
+	      (float)(dequeue_time - input_time) / 1000.,
+	      (float)(output_time - dequeue_time) / 1000.,
+	      (float)(output_time - input_time) / 1000.,
+	      psnr[0],
+	      psnr[1],
+	      psnr[2]);
 
 	self->first_out_frame = 0;
 
@@ -503,370 +996,89 @@ static int frame_output(struct vdec_prog *self, struct vbuf_buffer *out_buf)
 
 static void frame_output_cb(struct vdec_decoder *dec,
 			    int status,
-			    struct vbuf_buffer *out_buf,
+			    struct mbuf_raw_video_frame *out_frame,
 			    void *userdata)
 {
 	int res;
 	struct vdec_prog *self = userdata;
 
 	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(out_buf == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_IF(out_frame == NULL, EINVAL);
 
 	if (status != 0) {
 		ULOGE("decoder error, resync required");
 		return;
 	}
 
-	res = frame_output(self, out_buf);
+	res = frame_output(self, out_frame);
 	if (res < 0)
 		ULOG_ERRNO("frame_output", -res);
-}
 
+	self->output_count++;
 
-static int au_decode(struct vdec_prog *self)
-{
-	int res = 0, err;
-	uint8_t *in_meta;
-	struct timespec cur_ts = {0, 0};
-	struct vbuf_buffer *out_buf = NULL;
-
-	if (self->in_buf == NULL)
-		return 0;
-
-	if ((self->max_count > 0) && (self->input_count >= self->max_count))
-		goto cleanup;
-
-	if (self->configured) {
-		time_get_monotonic(&cur_ts);
-		time_timespec_to_us(&cur_ts, &self->in_meta.input_time);
-
-		res = vbuf_metadata_add(self->in_buf,
-					self->decoder,
-					1,
-					sizeof(self->in_meta),
-					(uint8_t **)&in_meta);
-		if (res < 0) {
-			ULOG_ERRNO("vbuf_metadata_add:input", -res);
-			goto cleanup;
-		}
-		memcpy(in_meta, &self->in_meta, sizeof(self->in_meta));
-
-		if (self->config.sync_decoding) {
-			res = vdec_sync_decode(
-				self->decoder, self->in_buf, &out_buf);
-			if (res < 0) {
-				ULOG_ERRNO("vdec_sync_decode", -res);
-				goto cleanup;
-			}
-
-			res = frame_output(self, out_buf);
-			if (res < 0)
-				ULOG_ERRNO("frame_output", -res);
-
-			res = vbuf_unref(out_buf);
-			if (res < 0) {
-				ULOG_ERRNO("vbuf_unref:output", -res);
-				goto cleanup;
-			}
-		} else {
-			res = vbuf_queue_push(self->in_queue, self->in_buf);
-			if (res < 0) {
-				ULOG_ERRNO("vbuf_queue_push:input", -res);
-				goto cleanup;
-			}
-		}
-		self->input_count++;
+	if ((self->input_finished) &&
+	    (self->output_count == self->input_count)) {
+		ULOGI("decoding is finished (output, count=%d)",
+		      self->output_count);
+		self->output_finished = 1;
+		return;
 	}
 
-cleanup:
-	err = vbuf_unref(self->in_buf);
-	if (err < 0)
-		ULOG_ERRNO("vbuf_unref:input", -err);
-	self->in_buf = NULL;
-	self->in_meta.index++;
-	self->in_meta.timestamp += self->ts_inc;
-	return res;
-}
-
-
-static int append_to_buffer(struct vbuf_buffer *buf,
-			    const uint8_t *data,
-			    size_t len,
-			    enum vdec_input_format format)
-{
-	int res;
-	ssize_t res1;
-	size_t au_offset, capacity;
-	size_t nalu_offset = (format == VDEC_INPUT_FORMAT_RAW_NALU) ? 0 : 4;
-	uint8_t *au_data, *nalu_data;
-	uint32_t start;
-
-	ULOG_ERRNO_RETURN_ERR_IF(buf == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(data == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(len == 0, EINVAL);
-
-	res1 = vbuf_get_size(buf);
-	if (res1 < 0) {
-		ULOG_ERRNO("vbuf_get_size", (int)-res1);
-		return (int)res1;
-	}
-	au_offset = res1;
-	res1 = vbuf_get_capacity(buf);
-	if (res1 < 0) {
-		ULOG_ERRNO("vbuf_get_capacity", (int)-res1);
-		return (int)res1;
-	}
-	capacity = res1;
-	if (capacity < au_offset + nalu_offset + len) {
-		res1 = vbuf_set_capacity(buf, au_offset + nalu_offset + len);
-		if (res1 < 0) {
-			ULOG_ERRNO("vbuf_set_capacity", (int)-res1);
-			return (int)res1;
-		}
-	}
-	au_data = vbuf_get_data(buf);
-	if (au_data == NULL) {
-		ULOG_ERRNO("vbuf_get_data", EPROTO);
-		return -EPROTO;
-	}
-	nalu_data = au_data + au_offset;
-	if (format == VDEC_INPUT_FORMAT_BYTE_STREAM) {
-		start = htonl(0x00000001);
-		memcpy(nalu_data, &start, sizeof(uint32_t));
-	} else if (format == VDEC_INPUT_FORMAT_AVCC) {
-		start = htonl(len);
-		memcpy(nalu_data, &start, sizeof(uint32_t));
-	}
-	memcpy(nalu_data + nalu_offset, data, len);
-	res = vbuf_set_size(buf, au_offset + nalu_offset + len);
-	if (res < 0) {
-		ULOG_ERRNO("vbuf_set_size", -res);
-		return res;
-	}
-
-	return 0;
-}
-
-
-static void nalu_end_cb(struct h264_ctx *ctx,
-			enum h264_nalu_type type,
-			const uint8_t *buf,
-			size_t len,
-			void *userdata)
-{
-	int res;
-	struct vdec_prog *self = userdata;
-
-	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(ctx == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(buf == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(len == 0, EINVAL);
-
-	/* Access unit change detection
-	 * see rec. ITU-T H.264 chap. 7.4.1.2.4 */
-	if ((self->in_buf != NULL) &&
-	    (self->prev_slice_header.slice_type !=
-	     (unsigned)H264_SLICE_TYPE_UNKNOWN) &&
-	    ((type == H264_NALU_TYPE_AUD) || (type == H264_NALU_TYPE_SPS) ||
-	     (type == H264_NALU_TYPE_PPS) || (type == H264_NALU_TYPE_SEI) ||
-	     (((unsigned)type >= 14) && ((unsigned)type <= 18)) ||
-	     (self->first_vcl_nalu && self->prev_vcl_nalu))) {
-		self->prev_vcl_nalu = 0;
-		res = au_decode(self);
+	/* TODO: This should be triggered by an event in the in_pool signaling
+	 * that a memory is available */
+	if (self->pending_nalu_len && self->in_pool && !self->in_mem) {
+		res = mbuf_pool_get(self->in_pool, &self->in_mem);
 		if (res < 0)
-			ULOG_ERRNO("au_decode", -res);
-	}
-
-	if ((type != H264_NALU_TYPE_SLICE) &&
-	    (type != H264_NALU_TYPE_SLICE_IDR)) {
-		self->prev_slice_header.slice_type =
-			(unsigned)H264_SLICE_TYPE_UNKNOWN;
-	} else {
-		self->prev_vcl_nalu = 1;
-	}
-
-	/* Save the SPS and PPS */
-	if ((type == H264_NALU_TYPE_SPS) && (self->sps == NULL)) {
-		self->sps_size = len;
-		self->sps = malloc(self->sps_size);
-		if (self->sps == NULL) {
-			ULOG_ERRNO("malloc", ENOMEM);
 			return;
-		}
-		memcpy(self->sps, buf, len);
-		ULOGI("SPS found");
-	} else if ((type == H264_NALU_TYPE_PPS) && (self->pps == NULL)) {
-		self->pps_size = len;
-		self->pps = malloc(self->pps_size);
-		if (self->pps == NULL) {
-			ULOG_ERRNO("malloc", ENOMEM);
-			return;
-		}
-		memcpy(self->pps, buf, len);
-		ULOGI("PPS found");
-	}
+		self->in_mem_offset = 0;
 
-	/* Configure the decoder */
-	if ((!self->configured) && (self->sps != NULL) && (self->pps != NULL)) {
-		res = configure(self);
+		/* Create the frame */
+		res = mbuf_coded_video_frame_new(&self->in_info,
+						 &self->in_frame);
 		if (res < 0) {
-			ULOG_ERRNO("configure", -res);
+			ULOG_ERRNO("mbuf_coded_video_frame_new:input", -res);
+			mbuf_mem_unref(self->in_mem);
+			self->in_mem = NULL;
 			return;
 		}
-	}
 
-	/* Get an input buffer (blocking) */
-	if ((self->in_pool != NULL) && (self->in_buf == NULL)) {
-		res = vbuf_pool_get(self->in_pool, -1, &self->in_buf);
+		/* Add the NALU to the input frame */
+		res = append_to_frame(self,
+				      self->in_frame,
+				      self->in_mem,
+				      self->pending_nalu,
+				      self->pending_nalu_len,
+				      self->pending_nalu_type);
 		if (res < 0) {
-			ULOG_ERRNO("vbuf_pool_get:input", -res);
+			ULOG_ERRNO("append_to_frame", -res);
+			mbuf_coded_video_frame_unref(self->in_frame);
+			mbuf_mem_unref(self->in_mem);
+			self->in_frame = NULL;
+			self->in_mem = NULL;
 			return;
 		}
+
+		res = pomp_loop_idle_add(self->loop, &au_parse_idle, self);
+		if (res < 0)
+			ULOG_ERRNO("pomp_loop_idle_add", -res);
+		self->pending_nalu_len = 0;
 	}
-	if (self->in_buf == NULL)
-		return;
-
-	/* Filter out SPS, PPS and AUD */
-	if ((type == H264_NALU_TYPE_AUD) || (type == H264_NALU_TYPE_SPS) ||
-	    (type == H264_NALU_TYPE_PPS))
-		return;
-
-	/* Add SPS/PPS for the first frame */
-	if (self->first_in_frame) {
-		res = append_to_buffer(self->in_buf,
-				       self->sps,
-				       self->sps_size,
-				       self->in_meta.format);
-		if (res < 0) {
-			ULOG_ERRNO("append_to_buffer", -res);
-			return;
-		}
-		res = append_to_buffer(self->in_buf,
-				       self->pps,
-				       self->pps_size,
-				       self->in_meta.format);
-		if (res < 0) {
-			ULOG_ERRNO("append_to_buffer", -res);
-			return;
-		}
-		self->first_in_frame = 0;
-	}
-
-	/* Add the NALU to the input buffer */
-	res = append_to_buffer(self->in_buf, buf, len, self->in_meta.format);
-	if (res < 0) {
-		ULOG_ERRNO("append_to_buffer", -res);
-		return;
-	}
-}
-
-
-static void slice_cb(struct h264_ctx *ctx,
-		     const uint8_t *buf,
-		     size_t len,
-		     const struct h264_slice_header *sh,
-		     void *userdata)
-{
-	int res;
-	struct vdec_prog *self = userdata;
-	struct h264_nalu_header nh;
-
-	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(ctx == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(buf == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(len == 0, EINVAL);
-	ULOG_ERRNO_RETURN_IF(sh == NULL, EINVAL);
-
-	self->first_vcl_nalu = 0;
-
-	memset(&nh, 0, sizeof(nh));
-	res = h264_parse_nalu_header(buf, len, &nh);
-	if (res < 0) {
-		ULOG_ERRNO("h264_parse_nalu_header", -res);
-		goto out;
-	}
-
-	if (self->prev_slice_header.slice_type ==
-	    (unsigned)H264_SLICE_TYPE_UNKNOWN) {
-		self->first_vcl_nalu = 1;
-		goto out;
-	}
-
-	/* Detection of the first VCL NAL unit of a primary coded picture
-	 * see rec. ITU-T H.264 chap. 7.4.1.2.4 */
-	if ((sh->pic_parameter_set_id !=
-	     self->prev_slice_header.pic_parameter_set_id) ||
-	    (sh->field_pic_flag != self->prev_slice_header.field_pic_flag) ||
-	    (nh.nal_ref_idc != self->prev_slice_nalu_header.nal_ref_idc)) {
-		self->first_vcl_nalu = 1;
-		goto out;
-	}
-	if (((nh.nal_unit_type == H264_NALU_TYPE_SLICE_IDR) ||
-	     (self->prev_slice_nalu_header.nal_unit_type ==
-	      H264_NALU_TYPE_SLICE_IDR)) &&
-	    ((nh.nal_unit_type != self->prev_slice_nalu_header.nal_unit_type) ||
-	     (sh->idr_pic_id != self->prev_slice_header.idr_pic_id))) {
-		self->first_vcl_nalu = 1;
-		goto out;
-	}
-	if ((self->sps_pic_order_cnt_type == 0) &&
-	    ((sh->pic_order_cnt_lsb !=
-	      self->prev_slice_header.pic_order_cnt_lsb) ||
-	     (sh->delta_pic_order_cnt_bottom !=
-	      self->prev_slice_header.delta_pic_order_cnt_bottom))) {
-		self->first_vcl_nalu = 1;
-		goto out;
-	}
-	if ((self->sps_pic_order_cnt_type == 1) &&
-	    ((sh->delta_pic_order_cnt[0] !=
-	      self->prev_slice_header.delta_pic_order_cnt[0]) ||
-	     (sh->delta_pic_order_cnt[1] !=
-	      self->prev_slice_header.delta_pic_order_cnt[1]))) {
-		self->first_vcl_nalu = 1;
-		goto out;
-	}
-	if ((!self->sps_frame_mbs_only_flag) && (sh->field_pic_flag) &&
-	    (self->prev_slice_header.field_pic_flag) &&
-	    (sh->bottom_field_flag !=
-	     self->prev_slice_header.bottom_field_flag)) {
-		self->first_vcl_nalu = 1;
-		goto out;
-	}
-
-out:
-	self->prev_slice_nalu_header = nh;
-	self->prev_slice_header = *sh;
-}
-
-
-static void sps_cb(struct h264_ctx *ctx,
-		   const uint8_t *buf,
-		   size_t len,
-		   const struct h264_sps *sps,
-		   void *userdata)
-{
-	struct vdec_prog *self = userdata;
-
-	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(ctx == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(buf == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(len == 0, EINVAL);
-	ULOG_ERRNO_RETURN_IF(sps == NULL, EINVAL);
-
-	self->sps_frame_mbs_only_flag = sps->frame_mbs_only_flag;
-	self->sps_pic_order_cnt_type = sps->pic_order_cnt_type;
 }
 
 
 static void flush_cb(struct vdec_decoder *dec, void *userdata)
 {
+	int res;
 	struct vdec_prog *self = userdata;
 
 	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
 
 	ULOGI("decoder is flushed");
-	self->flushed = 1;
-	pthread_cond_signal(&self->cond);
+
+	/* Stop the decoder */
+	res = vdec_stop(self->decoder);
+	if (res < 0)
+		ULOG_ERRNO("vdec_stop", -res);
 }
 
 
@@ -878,33 +1090,231 @@ static void stop_cb(struct vdec_decoder *dec, void *userdata)
 
 	ULOGI("decoder is stopped");
 	self->stopped = 1;
-	pthread_cond_signal(&self->cond);
+
+	pomp_loop_wakeup(self->loop);
 }
 
 
-static const struct h264_ctx_cbs h264_cbs = {
-	.nalu_end = &nalu_end_cb,
-	.slice = &slice_cb,
-	.sps = &sps_cb,
-};
-
-
 static const struct vdec_cbs vdec_cbs = {
-	.frame_output = &frame_output_cb,
-	.flush = &flush_cb,
-	.stop = &stop_cb,
+	.frame_output = frame_output_cb,
+	.flush = flush_cb,
+	.stop = stop_cb,
 };
+
+
+static void finish_idle(void *userdata)
+{
+	int res;
+	struct vdec_prog *self = userdata;
+
+	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
+
+	if (self->finishing)
+		return;
+
+	if ((s_stopping) || (self->input_finished)) {
+		self->finishing = 1;
+
+		/* Stop the parser */
+		stop_reader(self);
+
+		/* Flush the decoder */
+		res = vdec_flush(self->decoder, (s_stopping) ? 1 : 0);
+		if (res < 0)
+			ULOG_ERRNO("vdec_flush", -res);
+	}
+}
+
+
+static void au_parse_idle(void *userdata)
+{
+	int res;
+	size_t off = 0;
+	struct vdec_prog *self = userdata;
+
+	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
+
+	/* Waiting for input memory buffer */
+	if (self->pending_nalu_len && self->in_pool && !self->in_mem)
+		return;
+
+	switch (self->config.encoding) {
+	case VDEF_ENCODING_H264:
+		res = h264_reader_parse(self->reader.h264,
+					0,
+					(uint8_t *)self->in_data + self->in_off,
+					self->in_len - self->in_off,
+					&off);
+		if (res < 0) {
+			ULOG_ERRNO("h264_reader_parse", -res);
+			return;
+		}
+		break;
+	case VDEF_ENCODING_H265:
+		res = h265_reader_parse(self->reader.h265,
+					0,
+					(uint8_t *)self->in_data + self->in_off,
+					self->in_len - self->in_off,
+					&off);
+		if (res < 0) {
+			ULOG_ERRNO("h265_reader_parse", -res);
+			return;
+		}
+		break;
+	default:
+		break;
+	}
+
+	self->in_off += off;
+	if (((self->in_off >= self->in_len) ||
+	     ((self->max_count > 0) &&
+	      (self->input_count >= self->max_count))) &&
+	    self->in_frame != NULL) {
+		/* Decode the last AU in the file */
+		au_end(self);
+
+		ULOGI("decoding is finished (input, count=%d)",
+		      self->input_count);
+		self->input_finished = 1;
+
+		/* Stop the parser now, no point continuing */
+		stop_reader(self);
+
+		res = pomp_loop_idle_add(self->loop, &finish_idle, self);
+		if (res < 0)
+			ULOG_ERRNO("pomp_loop_idle_add", -res);
+	}
+
+	if (!self->input_finished && !self->finishing) {
+		res = pomp_loop_idle_add(self->loop, &au_parse_idle, self);
+		if (res < 0)
+			ULOG_ERRNO("pomp_loop_idle_add", -res);
+	}
+}
+
+
+static void sig_handler(int signum)
+{
+	int res;
+
+	ULOGI("signal %d(%s) received", signum, strsignal(signum));
+	printf("Stopping...\n");
+
+	s_stopping = 1;
+	signal(SIGINT, SIG_DFL);
+
+	if (s_self == NULL)
+		return;
+
+	res = pomp_loop_idle_add(s_self->loop, &finish_idle, s_self);
+	if (res < 0)
+		ULOG_ERRNO("pomp_loop_idle_add", -res);
+}
+
+
+enum args_id {
+	ARGS_ID_PSNR_SRC = 256,
+	ARGS_ID_PSNR_SRC_FORMAT,
+	ARGS_ID_PSNR_SRC_START,
+	ARGS_ID_PSNR_CSV,
+};
+
+
+static const char short_options[] = "hi:o:s:n:lj:d:";
+
+
+static const struct option long_options[] = {
+	{"help", no_argument, NULL, 'h'},
+	{"infile", required_argument, NULL, 'i'},
+	{"outfile", required_argument, NULL, 'o'},
+	{"start", required_argument, NULL, 's'},
+	{"count", required_argument, NULL, 'n'},
+	{"low-delay", no_argument, NULL, 'l'},
+	{"threads", required_argument, NULL, 'j'},
+	{"decimation", required_argument, NULL, 'd'},
+	{"psnr-src", required_argument, NULL, ARGS_ID_PSNR_SRC},
+	{"psnr-src-format", required_argument, NULL, ARGS_ID_PSNR_SRC_FORMAT},
+	{"psnr-src-start", required_argument, NULL, ARGS_ID_PSNR_SRC_START},
+	{"psnr-csv", required_argument, NULL, ARGS_ID_PSNR_CSV},
+	{0, 0, 0, 0},
+};
+
+
+static void welcome(char *prog_name)
+{
+	printf("\n%s - Video decoding program\n"
+	       "Copyright (c) 2017 Parrot Drones SAS\n\n",
+	       prog_name);
+}
+
+
+static void usage(char *prog_name)
+{
+	printf("Usage: %s [options]\n"
+	       "Options:\n"
+	       "  -h | --help                        "
+	       "Print this message\n"
+	       "  -i | --infile <file_name>          "
+	       "H.264 Annex B byte stream input file (.264/.h264)\n"
+	       "  -o | --outfile <file_name>         "
+	       "YUV output file\n"
+	       "  -s | --start <i>                   "
+	       "Start decoding at frame index i\n"
+	       "  -n | --count <n>                   "
+	       "Decode at most n frames\n"
+	       "  -l | --low-delay                   "
+	       "Favor low delay decoding\n"
+	       "  -j | --threads <thread_count>      "
+	       "Preferred decoding thread count (0 = default,\n"
+	       "                                     "
+	       "1 = no multi-threading, >1 = multi-threading)\n"
+	       "  -d | --decimation <n>              "
+	       "Known decimation factor, applied to bitrate computation "
+	       "and PSNR source file (default is 1)\n"
+	       "       --psnr-src <yuv_file>         "
+	       "Source YUV file for PSNR computation\n"
+	       "       --psnr-src-format <format>    "
+	       "Source YUV file data format (\"I420\", \"YV12\", "
+	       "\"NV12\", \"NV21\"...)\n"
+	       "       --psnr-src-start <i>          "
+	       "Source YUV file start index for PSNR computation\n"
+	       "       --psnr-csv <file>             "
+	       "Output the PSNR results to a CSV file\n"
+	       "\n",
+	       prog_name);
+}
+
+
+static int is_suffix(const char *suffix, const char *s)
+{
+	size_t suffix_len = strlen(suffix);
+	size_t s_len = strlen(s);
+
+	return s_len >= suffix_len &&
+	       (strcasecmp(suffix, &s[s_len - suffix_len]) == 0);
+}
 
 
 int main(int argc, char **argv)
 {
 	int res = 0, status = EXIT_SUCCESS;
-	int idx, c, mutex_init = 0, cond_init = 0;
-	uint32_t supported_input_format;
+	int idx, c;
+	const struct vdef_coded_format *supported_input_formats;
+	int nb_supported_input_formats;
 	struct vdec_prog *self = NULL;
 	struct timespec cur_ts = {0, 0};
 	uint64_t start_time = 0, end_time = 0;
-	size_t off = 0;
+	double bitrate = 0.;
+
+	s_self = NULL;
+	s_stopping = 0;
+
+	struct vdef_coded_format byte_stream = {
+		.data_format = VDEF_CODED_DATA_FORMAT_BYTE_STREAM,
+	};
+	struct vdef_coded_format avcc = {
+		.data_format = VDEF_CODED_DATA_FORMAT_AVCC,
+	};
 
 	welcome(argv[0]);
 
@@ -919,32 +1329,16 @@ int main(int argc, char **argv)
 		status = EXIT_FAILURE;
 		goto out;
 	}
+	s_self = self;
 #ifdef _WIN32
 	self->in_file = INVALID_HANDLE_VALUE;
 	self->in_file_map = INVALID_HANDLE_VALUE;
 #else
 	self->in_fd = -1;
 #endif
-	self->first_in_frame = 1;
 	self->first_out_frame = 1;
 	self->ts_inc = DEFAULT_TS_INC;
-	self->in_meta.complete = 1;
-	self->in_meta.ref = 1;
-	self->prev_slice_header.slice_type = (unsigned)H264_SLICE_TYPE_UNKNOWN;
-	res = pthread_mutex_init(&self->mutex, NULL);
-	if (res != 0) {
-		ULOG_ERRNO("pthread_mutex_init", res);
-		status = EXIT_FAILURE;
-		goto out;
-	}
-	mutex_init = 1;
-	res = pthread_cond_init(&self->cond, NULL);
-	if (res != 0) {
-		ULOG_ERRNO("pthread_cond_init", res);
-		status = EXIT_FAILURE;
-		goto out;
-	}
-	cond_init = 1;
+	self->decimation = 1;
 
 	/* Command-line parameters */
 	while ((c = getopt_long(
@@ -960,24 +1354,27 @@ int main(int argc, char **argv)
 
 		case 'i':
 			self->input_file = optarg;
+			if (is_suffix(".h265", self->input_file) ||
+			    is_suffix(".265", self->input_file) ||
+			    is_suffix(".hvc", self->input_file)) {
+				self->config.encoding = VDEF_ENCODING_H265;
+			} else {
+				self->config.encoding = VDEF_ENCODING_H264;
+			}
 			break;
 
 		case 'o':
 			self->output_file = optarg;
-			if ((strlen(self->output_file) > 4) &&
-			    (!strncasecmp(self->output_file +
-						  strlen(self->output_file) - 4,
-					  ".y4m",
-					  4)))
-				self->output_file_y4m = 1;
+			if (is_suffix(".y4m", self->output_file))
+				self->writer_cfg.y4m = 1;
+			break;
+
+		case 's':
+			self->start_index = atoi(optarg);
 			break;
 
 		case 'n':
 			self->max_count = atoi(optarg);
-			break;
-
-		case 's':
-			self->config.sync_decoding = 1;
 			break;
 
 		case 'l':
@@ -986,6 +1383,32 @@ int main(int argc, char **argv)
 
 		case 'j':
 			self->config.preferred_thread_count = atoi(optarg);
+			break;
+
+		case 'd':
+			self->decimation = atoi(optarg);
+			break;
+
+		case ARGS_ID_PSNR_SRC:
+			self->psnr.src = optarg;
+			break;
+
+		case ARGS_ID_PSNR_SRC_FORMAT:
+			res = vdef_raw_format_from_str(optarg,
+						       &self->psnr.src_format);
+			if (res < 0) {
+				ULOG_ERRNO("vdef_raw_format_from_str", -res);
+				status = EXIT_FAILURE;
+				goto out;
+			}
+			break;
+
+		case ARGS_ID_PSNR_SRC_START:
+			self->psnr.start_index = atoi(optarg);
+			break;
+
+		case ARGS_ID_PSNR_CSV:
+			self->psnr.csv = optarg;
 			break;
 
 		default:
@@ -1003,6 +1426,22 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
+	/* Setup signal handlers */
+	signal(SIGINT, &sig_handler);
+	signal(SIGTERM, &sig_handler);
+#ifndef _WIN32
+	signal(SIGPIPE, SIG_IGN);
+#endif
+
+	/* Loop */
+	self->loop = pomp_loop_new();
+	if (self->loop == NULL) {
+		res = -ENOMEM;
+		ULOG_ERRNO("pomp_loop_new", -res);
+		status = EXIT_FAILURE;
+		goto out;
+	}
+
 	/* Map the input file */
 	res = map_file(self);
 	if (res < 0) {
@@ -1010,40 +1449,68 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	/* Output file */
-	if (self->output_file) {
-		self->out_file = fopen(self->output_file, "wb");
-		if (self->out_file == NULL) {
-			ULOG_ERRNO("fopen", errno);
+	/* Create reader */
+	switch (self->config.encoding) {
+	case VDEF_ENCODING_H264:
+		res = h264_reader_new(&h264_cbs, self, &self->reader.h264);
+		if (res < 0) {
+			ULOG_ERRNO("h264_reader_new", -res);
 			status = EXIT_FAILURE;
 			goto out;
 		}
+		break;
+
+	case VDEF_ENCODING_H265:
+		res = h265_reader_new(&h265_cbs, self, &self->reader.h265);
+		if (res < 0) {
+			ULOG_ERRNO("h265_reader_new", -res);
+			status = EXIT_FAILURE;
+			goto out;
+		}
+		break;
+	default:
+		break;
 	}
 
-	/* Create the H.264 reader */
-	res = h264_reader_new(&h264_cbs, self, &self->reader);
-	if (res < 0) {
-		ULOG_ERRNO("h264_reader_new", -res);
+	nb_supported_input_formats = vdec_get_supported_input_formats(
+		VDEC_DECODER_IMPLEM_AUTO, &supported_input_formats);
+	if (nb_supported_input_formats < 0) {
+		ULOG_ERRNO("vdec_get_supported_input_formats",
+			   -nb_supported_input_formats);
 		status = EXIT_FAILURE;
 		goto out;
 	}
 
-	supported_input_format =
-		vdec_get_supported_input_format(VDEC_DECODER_IMPLEM_AUTO);
-	if (supported_input_format & VDEC_INPUT_FORMAT_BYTE_STREAM) {
-		self->in_meta.format = VDEC_INPUT_FORMAT_BYTE_STREAM;
-	} else if (supported_input_format & VDEC_INPUT_FORMAT_AVCC) {
-		self->in_meta.format = VDEC_INPUT_FORMAT_AVCC;
+	byte_stream.encoding = avcc.encoding = self->config.encoding;
+	if (vdef_coded_format_intersect(&byte_stream,
+					supported_input_formats,
+					nb_supported_input_formats)) {
+		self->in_info.format = byte_stream;
+	} else if (vdef_coded_format_intersect(&avcc,
+					       supported_input_formats,
+					       nb_supported_input_formats)) {
+		self->in_info.format = avcc;
 	} else {
-		ULOGE("unsuppoted input format");
+		ULOGE("unsupported video encoding");
 		status = EXIT_FAILURE;
 		goto out;
 	}
+
+	self->config.gen_grey_idr = 1;
 
 	/* Create the decoder */
-	res = vdec_new(&self->config, &vdec_cbs, self, &self->decoder);
+	res = vdec_new(
+		self->loop, &self->config, &vdec_cbs, self, &self->decoder);
 	if (res < 0) {
 		ULOG_ERRNO("vdec_new", -res);
+		status = EXIT_FAILURE;
+		goto out;
+	}
+
+	/* Start */
+	res = pomp_loop_idle_add(self->loop, au_parse_idle, self);
+	if (res < 0) {
+		ULOG_ERRNO("pomp_loop_idle_add", -res);
 		status = EXIT_FAILURE;
 		goto out;
 	}
@@ -1051,85 +1518,128 @@ int main(int argc, char **argv)
 	time_get_monotonic(&cur_ts);
 	time_timespec_to_us(&cur_ts, &start_time);
 
-	/* Parse the input file */
-	res = h264_reader_parse(
-		self->reader, 0, self->in_data, self->in_size, &off);
-	if (res < 0) {
-		ULOG_ERRNO("h264_reader_parse", -res);
-		status = EXIT_FAILURE;
-		goto out;
-	}
-
-	/* Decode the last frame */
-	if (self->in_buf != NULL) {
-		res = au_decode(self);
-		if (res < 0)
-			ULOG_ERRNO("au_decode", -res);
-	}
-
-	/* Flush and stop the decoder (async decoding only) */
-	if (!self->config.sync_decoding) {
-		pthread_mutex_lock(&self->mutex);
-		res = vdec_flush(self->decoder, 0);
-		if (res < 0) {
-			ULOG_ERRNO("vdec_flush", -res);
-			status = EXIT_FAILURE;
-			goto out;
-		}
-		while (!self->flushed)
-			pthread_cond_wait(&self->cond, &self->mutex);
-		res = vdec_stop(self->decoder);
-		if (res < 0) {
-			ULOG_ERRNO("vdec_stop", -res);
-			status = EXIT_FAILURE;
-			goto out;
-		}
-		while (!self->stopped)
-			pthread_cond_wait(&self->cond, &self->mutex);
-		pthread_mutex_unlock(&self->mutex);
-	}
+	/* Main loop */
+	while (!self->stopped)
+		pomp_loop_wait_and_process(self->loop, -1);
 
 	time_get_monotonic(&cur_ts);
 	time_timespec_to_us(&cur_ts, &end_time);
-	printf("\nOverall time: %.2fs\n",
+	printf("\nTotal frames: input=%u output=%u\n",
+	       self->input_count,
+	       self->output_count);
+	printf("Overall time: %.2fs\n",
 	       (float)(end_time - start_time) / 1000000.);
+	if ((self->framerate.num != 0) && (self->framerate.den != 0) &&
+	    (self->total_bytes > 0) && (self->output_count > 0) &&
+	    (self->input_count == self->output_count)) {
+		double bitrate_scaled = bitrate =
+			(double)self->total_bytes * 8 / self->output_count *
+			self->framerate.num / self->framerate.den;
+		char *bitrate_str = "";
+		if (bitrate_scaled > 1000.) {
+			bitrate_scaled /= 1000.;
+			bitrate_str = "K";
+		}
+		if (bitrate_scaled > 1000.) {
+			bitrate_scaled /= 1000.;
+			bitrate_str = "M";
+		}
+		printf("Framerate: %u/%u, bitrate: %.1f%sbit/s\n",
+		       self->framerate.num,
+		       self->framerate.den,
+		       bitrate_scaled,
+		       bitrate_str);
+	}
+
+	if (self->psnr.reader != NULL && self->output_count != 0) {
+		if (self->psnr.csv_file != NULL) {
+			fprintf(self->psnr.csv_file,
+				"#overall %.1f %.3f %.3f %.3f\n",
+				bitrate,
+				self->psnr.psnr_sum[0] / self->output_count,
+				self->psnr.psnr_sum[1] / self->output_count,
+				self->psnr.psnr_sum[2] / self->output_count);
+		}
+
+		printf("PSNR: Y=%.3fdB U=%.3fdB V=%.3fdB\n",
+		       self->psnr.psnr_sum[0] / self->output_count,
+		       self->psnr.psnr_sum[1] / self->output_count,
+		       self->psnr.psnr_sum[2] / self->output_count);
+	}
 
 out:
 	/* Cleanup and exit */
 	if (self != NULL) {
+		if (self->loop) {
+			res = pomp_loop_idle_remove(
+				self->loop, &finish_idle, self);
+			if (res < 0)
+				ULOG_ERRNO("pomp_loop_idle_remove", -res);
+			res = pomp_loop_idle_remove(
+				self->loop, &au_parse_idle, self);
+			if (res < 0)
+				ULOG_ERRNO("pomp_loop_idle_remove", -res);
+		}
 		unmap_file(self);
-		if (self->out_file != NULL)
-			fclose(self->out_file);
-		if (self->in_buf != NULL) {
-			res = vbuf_unref(self->in_buf);
+		res = vraw_writer_destroy(self->writer);
+		if (res < 0)
+			ULOG_ERRNO("vraw_writer_destroy", -res);
+		if (self->in_frame != NULL) {
+			res = mbuf_coded_video_frame_unref(self->in_frame);
 			if (res < 0)
-				ULOG_ERRNO("vbuf_unref:input", -res);
+				ULOG_ERRNO("mbuf_coded_video_frame_unref:input",
+					   -res);
 		}
-		if (self->reader != NULL) {
-			res = h264_reader_destroy(self->reader);
+		if (self->in_mem != NULL) {
+			res = mbuf_mem_unref(self->in_mem);
 			if (res < 0)
-				ULOG_ERRNO("h264_reader_destroy", -res);
+				ULOG_ERRNO("mbuf_mem_unref:input", -res);
 		}
+
+		switch (self->config.encoding) {
+		case VDEF_ENCODING_H264:
+			if (self->reader.h264 != NULL) {
+				res = h264_reader_destroy(self->reader.h264);
+				if (res < 0)
+					ULOG_ERRNO("h264_reader_destroy", -res);
+			}
+			break;
+		case VDEF_ENCODING_H265:
+			if (self->reader.h265 != NULL) {
+				res = h265_reader_destroy(self->reader.h265);
+				if (res < 0)
+					ULOG_ERRNO("h265_reader_destroy", -res);
+			}
+			break;
+		default:
+			break;
+		}
+
 		if (self->decoder != NULL) {
 			res = vdec_destroy(self->decoder);
 			if (res < 0)
 				ULOG_ERRNO("vdec_destroy", -res);
 		}
 		if (self->in_pool_allocated) {
-			res = vbuf_pool_destroy(self->in_pool);
+			res = mbuf_pool_destroy(self->in_pool);
 			if (res < 0)
-				ULOG_ERRNO("vbuf_pool_destroy:input", -res);
+				ULOG_ERRNO("mbuf_pool_destroy:input", -res);
 		}
-		if (cond_init) {
-			res = pthread_cond_destroy(&self->cond);
-			if (res != 0)
-				ULOG_ERRNO("pthread_cond_destroy", res);
+		if (self->loop) {
+			res = pomp_loop_destroy(self->loop);
+			if (res < 0)
+				ULOG_ERRNO("pomp_loop_destroy", -res);
 		}
-		if (mutex_init) {
-			res = pthread_mutex_destroy(&self->mutex);
-			if (res != 0)
-				ULOG_ERRNO("pthread_mutex_destroy", res);
+		free(self->pending_nalu);
+		if (self->psnr.csv_file != NULL)
+			fclose(self->psnr.csv_file);
+		if (self->psnr.reader) {
+			status = vraw_reader_destroy(self->psnr.reader);
+			if (status < 0)
+				ULOG_ERRNO("vraw_reader_destroy", -status);
 		}
+		free(self->psnr.src_data);
+		free(self->vps);
 		free(self->sps);
 		free(self->pps);
 		free(self);

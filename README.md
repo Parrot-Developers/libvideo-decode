@@ -45,38 +45,19 @@ configuration.
 
 ## Operation
 
-Two modes of operation can be used for decoding: asynchronous and synchronous.
+Operations are asynchronous: the application pushes buffers to decode in the
+input queue and is notified of decoded frames through a callback function.
 
 Some decoders need the input buffers to be originating from its own buffer
 pool; when the input buffer pool returned by the library is not _NULL_ it must
 be used and input buffers cannot be shared with other video pipeline elements.
 
-### Asynchronous decoding mode
-
-In asynchronous mode the application pushes buffers to decode in the input
-queue and is notified of decoded frames through a callback function.
-
-Asynchronous decoding mode support is mandatory for decoding implementations
-and is always available.
-
-### Synchronous decoding mode
-
-In synchronous mode the application calls the synchronized decoding function
-with an input buffer to decode and a decoded output buffer is returned. The
-function is blocking during the processing time.
-
-Synchronous decoding mode support is optional for decoding implementations
-and is not always available.
-
 ### Threading model
 
-The API functions are not thread safe and should always be called from the
-same thread, or it is the caller's resposibility to synchronize calls if
-multiple threads are used.
-
-In asynchronous mode, the callback functions (frame output, flush or stop)
-are generally called from a library internal thread and the application has
-the responsibility of synchronization with its thread(s).
+The library is designed to run on a _libpomp_ event loop (_pomp_loop_, see
+_libpomp_ documentation). All API functions must be called from the _pomp_loop_
+thread. All callback functions (frame_output, flush or stop) are called from
+the _pomp_loop_ thread.
 
 ## Testing
 

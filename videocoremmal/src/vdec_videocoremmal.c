@@ -25,53 +25,88 @@
  */
 
 #define ULOG_TAG vdec_videocoremmal
-#include "vdec_priv.h"
-ULOG_DECLARE_TAG(vdec_videocoremmal);
-
-#ifdef BUILD_MMAL
-
-#	include <interface/mmal/mmal.h>
-#	include <interface/mmal/util/mmal_default_components.h>
-#	include <interface/mmal/util/mmal_util.h>
-#	include <interface/mmal/util/mmal_util_params.h>
-#	include <interface/mmal/vc/mmal_vc_api.h>
-
-#	include <video-buffers/vbuf_private.h>
+#include <ulog.h>
+ULOG_DECLARE_TAG(ULOG_TAG);
 
 
-#	define VDEC_VIDEOCOREMMAL_OUT_BUFFERS_COUNT 20
-#	define VDEC_VIDEOCOREMMAL_OUT_NUM_EXTRA_BUFFERS 20
-#	define VDEC_VIDEOCOREMMAL_BUF_TYPE_MMAL 0x4D4D414C /* "MDCD" */
+#include "vdec_videocoremmal_priv.h"
 
 
-struct vdec_videocoremmal {
-	struct vdec_decoder *base;
-	struct vbuf_pool *in_pool;
-	struct vbuf_queue *in_queue;
-	struct vbuf_queue *decoder_queue;
-	struct vbuf_pool *out_pool;
-	MMAL_COMPONENT_T *decoder;
-	MMAL_POOL_T *mmal_in_pool;
-	MMAL_POOL_T *mmal_out_pool;
-	MMAL_QUEUE_T *mmal_out_queue;
-	int flushing;
-	uint64_t last_input_pts;
-	uint64_t last_output_pts;
-
-	pthread_t thread;
-	int thread_launched;
-	int should_stop;
-	int flush;
-	int flush_discard;
-
-	enum vdec_output_format output_format;
-	unsigned int stride;
-};
+#define NB_SUPPORTED_FORMATS 1
+static struct vdef_coded_format supported_formats[NB_SUPPORTED_FORMATS];
+static pthread_once_t supported_formats_is_init = PTHREAD_ONCE_INIT;
+static void initialize_supported_formats(void)
+{
+	supported_formats[0] = vdef_h264_byte_stream;
+}
 
 
-struct vdec_videocoremmal_mmalbuf {
-	MMAL_BUFFER_HEADER_T *mmal_buf;
-};
+static void flush_complete(struct vdec_videocoremmal *self)
+{
+	/* Call the flush callback if defined */
+	if (self->base->cbs.flush)
+		self->base->cbs.flush(self->base, self->base->userdata);
+}
+
+
+static void stop_complete(struct vdec_videocoremmal *self)
+{
+	/* Call the stop callback if defined */
+	if (self->base->cbs.stop)
+		self->base->cbs.stop(self->base, self->base->userdata);
+}
+
+
+static void mbox_cb(int fd, uint32_t revents, void *userdata)
+{
+	struct vdec_videocoremmal *self = userdata;
+	int ret;
+	char message;
+
+	do {
+		/* Read from the mailbox */
+		ret = mbox_peek(self->mbox, &message);
+		if (ret < 0) {
+			if (ret != -EAGAIN)
+				ULOG_ERRNO("mbox_peek", -ret);
+			break;
+		}
+
+		switch (message) {
+		case VDEC_MSG_FLUSH:
+			flush_complete(self);
+			break;
+		case VDEC_MSG_STOP:
+			stop_complete(self);
+			break;
+		default:
+			ULOGE("unknown message: %c", message);
+			break;
+		}
+	} while (ret == 0);
+}
+
+
+static void out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
+{
+	struct vdec_videocoremmal *self = userdata;
+	struct vbuf_buffer *out_buf = NULL;
+	int ret;
+
+	do {
+		ret = vbuf_queue_pop(self->out_queue, 0, &out_buf);
+		if (ret == -EAGAIN) {
+			return;
+		} else if (ret < 0) {
+			ULOG_ERRNO("vbuf_queue_pop:output", -ret);
+			return;
+		}
+		self->base->cbs.frame_output(
+			self->base, 0, out_buf, self->base->userdata);
+		vbuf_unref(out_buf);
+		out_buf = NULL;
+	} while (ret == 0);
+}
 
 
 static int vdec_videocoremmal_mmalbuf_set_buf(struct vbuf_buffer *buf,
@@ -291,13 +326,16 @@ static int vdec_videocoremmal_do_flush(struct vdec_videocoremmal *self)
 			   status);
 	}
 
-	/* Flush the input and decoder queues */
+	/* Flush the queues */
 	ret = vbuf_queue_flush(self->in_queue);
 	if (ret < 0)
 		ULOG_ERRNO("vbuf_queue_flush:input", -ret);
 	ret = vbuf_queue_flush(self->decoder_queue);
 	if (ret < 0)
 		ULOG_ERRNO("vbuf_queue_flush:decoder", -ret);
+	ret = vbuf_queue_flush(self->out_queue);
+	if (ret < 0)
+		ULOG_ERRNO("vbuf_queue_flush:output", -ret);
 
 	/* Flush all ports */
 	status = mmal_port_flush(self->decoder->input[0]);
@@ -344,9 +382,12 @@ static int vdec_videocoremmal_do_flush(struct vdec_videocoremmal *self)
 			   status);
 	}
 
-	/* Call the flush callback if defined */
-	if (self->base->cbs.flush)
-		(*self->base->cbs.flush)(self->base, self->base->userdata);
+	/* Call the flush callback on the loop */
+	char message = VDEC_MSG_FLUSH;
+	ret = mbox_push(self->mbox, &message);
+	if (ret < 0)
+		ULOG_ERRNO("mbox_push", -ret);
+
 	self->flush = 0;
 
 	return 0;
@@ -356,11 +397,16 @@ static int vdec_videocoremmal_do_flush(struct vdec_videocoremmal *self)
 /* Flush without discarding frames */
 static int vdec_videocoremmal_complete_flush(struct vdec_videocoremmal *self)
 {
+	int ret;
+
 	self->flushing = 0;
 
-	/* Call the flush callback if defined */
-	if (self->base->cbs.flush)
-		(*self->base->cbs.flush)(self->base, self->base->userdata);
+	/* Call the flush callback on the loop */
+	char message = VDEC_MSG_FLUSH;
+	ret = mbox_push(self->mbox, &message);
+	if (ret < 0)
+		ULOG_ERRNO("mbox_push", -ret);
+
 	self->flush = 0;
 
 	return 0;
@@ -387,6 +433,7 @@ static int vdec_videocoremmal_start_flush(struct vdec_videocoremmal *self)
 
 static void vdec_videocoremmal_do_stop(struct vdec_videocoremmal *self)
 {
+	int ret;
 	MMAL_STATUS_T status;
 	MMAL_BUFFER_HEADER_T *buffer = NULL;
 
@@ -432,9 +479,11 @@ static void vdec_videocoremmal_do_stop(struct vdec_videocoremmal *self)
 	while ((buffer = mmal_queue_get(self->mmal_out_queue)))
 		mmal_buffer_header_release(buffer);
 
-	/* Call the stop callback if defined */
-	if (self->base->cbs.stop)
-		(*self->base->cbs.stop)(self->base, self->base->userdata);
+	/* Call the stop callback on the loop */
+	char message = VDEC_MSG_STOP;
+	ret = mbox_push(self->mbox, &message);
+	if (ret < 0)
+		ULOG_ERRNO("mbox_push", -ret);
 }
 
 
@@ -471,42 +520,44 @@ vdec_videocoremmal_set_frame_metadata(struct vdec_videocoremmal *self,
 		ULOG_ERRNO("vbuf_metadata_add:output", -ret);
 		return ret;
 	}
-	out_meta->timestamp = in_meta->timestamp;
-	out_meta->index = in_meta->index;
-	out_meta->format = self->output_format;
-	switch (out_meta->format) {
-	case VDEC_OUTPUT_FORMAT_NV12:
+	out_meta->frame.format = self->output_format;
+	out_meta->frame.info = in_meta->frame.info;
+	if (vdef_raw_format_cmp(&out_meta->frame.format, &vdef_nv12)) {
 		out_meta->plane_offset[0] = 0;
-		out_meta->plane_offset[1] = self->stride * self->base->height;
-		out_meta->plane_stride[0] = self->stride;
-		out_meta->plane_stride[1] = self->stride;
-		break;
-	case VDEC_OUTPUT_FORMAT_I420:
+		out_meta->plane_offset[1] =
+			self->stride * self->base->video_info.resolution.height;
+		out_meta->frame.plane_stride[0] = self->stride;
+		out_meta->frame.plane_stride[1] = self->stride;
+	} else if (vdef_raw_format_cmp(&out_meta->frame.format, &vdef_i420)) {
 		out_meta->plane_offset[0] = 0;
-		out_meta->plane_offset[1] = self->stride * self->base->height;
+		out_meta->plane_offset[1] =
+			self->stride * self->base->video_info.resolution.height;
 		out_meta->plane_offset[2] =
-			self->stride * self->base->height * 5 / 4;
-		out_meta->plane_stride[0] = self->stride;
-		out_meta->plane_stride[1] = self->stride / 2;
-		out_meta->plane_stride[2] = self->stride / 2;
-		break;
-	case VDEC_OUTPUT_FORMAT_MMAL_OPAQUE:
-		out_meta->plane_stride[0] = self->stride;
-		break;
-	default:
+			self->stride *
+			self->base->video_info.resolution.height * 5 / 4;
+		out_meta->frame.plane_stride[0] = self->stride;
+		out_meta->frame.plane_stride[1] = self->stride / 2;
+		out_meta->frame.plane_stride[2] = self->stride / 2;
+	} else if (vdef_raw_format_cmp(&out_meta->frame.format,
+				       &vdef_mmal_opaque)) {
+		out_meta->frame.plane_stride[0] = self->stride;
+	} else {
 		ret = -ENOSYS;
 		ULOG_ERRNO("unsupported output chroma format", -ret);
 		return ret;
 	}
-	out_meta->width = self->base->width;
-	out_meta->height = self->base->height;
-	out_meta->sar_width = self->base->sar_width;
-	out_meta->sar_height = self->base->sar_height;
-	out_meta->crop_left = self->base->crop_left;
-	out_meta->crop_top = self->base->crop_top;
-	out_meta->crop_width = self->base->crop_width;
-	out_meta->crop_height = self->base->crop_height;
-	out_meta->full_range = self->base->full_range;
+	out_meta->frame.info.bit_depth = self->base->video_info.bit_depth;
+	out_meta->frame.info.full_range = self->base->video_info.full_range;
+	out_meta->frame.info.color_primaries =
+		self->base->video_info.color_primaries;
+	out_meta->frame.info.transfer_function =
+		self->base->video_info.transfer_function;
+	out_meta->frame.info.matrix_coefs = self->base->video_info.matrix_coefs;
+	out_meta->frame.info.resolution.width =
+		self->base->video_info.crop.width;
+	out_meta->frame.info.resolution.height =
+		self->base->video_info.crop.height;
+	out_meta->frame.info.sar = self->base->video_info.sar;
 	out_meta->errors = in_meta->errors;
 	out_meta->silent = in_meta->silent;
 	out_meta->userdata = in_meta->userdata;
@@ -544,6 +595,71 @@ vdec_videocoremmal_set_frame_metadata(struct vdec_videocoremmal *self,
 }
 
 
+static int
+vdec_videocoremmal_insert_grey_idr(struct vdec_videocoremmal *self,
+				   struct vdec_input_metadata *in_meta,
+				   unsigned int level,
+				   uint64_t *delta)
+{
+	int ret;
+	struct h264_ctx *ctx = h264_reader_get_ctx(self->base->reader.h264);
+	uint64_t timestamp;
+	MMAL_BUFFER_HEADER_T *mmal_buf = NULL;
+	MMAL_STATUS_T status;
+	struct vbuf_buffer *idr_buf = NULL;
+
+	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(in_meta == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(delta == NULL, EINVAL);
+
+	ret = vbuf_pool_get(self->in_pool, 0, &idr_buf);
+	if (ret < 0) {
+		if (ret != -EAGAIN)
+			ULOG_ERRNO("vbuf_pool_get", -ret);
+		return ret;
+	}
+
+	timestamp = in_meta->frame.info.timestamp;
+
+	ret = vdec_h264_write_grey_idr(
+		self->base, in_meta, level, delta, &timestamp, idr_buf);
+	if (ret < 0) {
+		ULOG_ERRNO("vdec_h264_write_grey_idr", -ret);
+		goto out;
+	}
+
+	/* Push the frame */
+	mmal_buf = vdec_videocoremmal_mmalbuf_get_buf(idr_buf);
+	if (mmal_buf == NULL) {
+		ret = -EPROTO;
+		ULOG_ERRNO("vdec_videocoremmal_mmalbuf_get_buf:input", -ret);
+		goto out;
+	}
+	mmal_buf->cmd = 0;
+	mmal_buf->length = vbuf_get_size(idr_buf);
+	mmal_buf->offset = 0;
+	mmal_buf->flags = MMAL_BUFFER_HEADER_FLAG_FRAME;
+	mmal_buf->pts = in_meta->frame.info.timestamp;
+	self->last_input_pts = in_meta->frame.info.timestamp;
+	mmal_buf->dts = in_meta->frame.info.timestamp;
+	mmal_buf->user_data = idr_buf;
+
+	status = mmal_port_send_buffer(self->decoder->input[0], mmal_buf);
+	if (status != MMAL_SUCCESS) {
+		ret = -EPROTO;
+		ULOG_ERRNO(
+			"mmal_port_send_buffer mmal_status=%d", -ret, status);
+		goto out;
+	}
+
+out:
+	if (idr_buf)
+		vbuf_unref(idr_buf);
+
+	return ret;
+}
+
+
 static int vdec_videocoremmal_buffer_push_one(struct vdec_videocoremmal *self,
 					      struct vbuf_buffer *in_buf)
 {
@@ -552,6 +668,8 @@ static int vdec_videocoremmal_buffer_push_one(struct vdec_videocoremmal *self,
 	struct timespec cur_ts = {0, 0};
 	MMAL_BUFFER_HEADER_T *mmal_buf = NULL;
 	MMAL_STATUS_T status;
+	uint64_t delta = 0;
+	unsigned int level = 0;
 
 	/* Copy the buffer in case it is not originating from the
 	 * input buffer pool */
@@ -594,14 +712,14 @@ static int vdec_videocoremmal_buffer_push_one(struct vdec_videocoremmal *self,
 			vbuf_unref(buf);
 			return ret;
 		}
-		ret = vdec_h264_format_convert(
-			buf, meta->format, VDEC_INPUT_FORMAT_BYTE_STREAM);
+		ret = vdec_format_convert(
+			buf, meta->frame.format, VDEF_H264_BYTE_STREAM);
 		if (ret < 0) {
 			vbuf_unref(in_buf);
 			vbuf_unref(buf);
 			return ret;
 		}
-		meta->format = VDEC_INPUT_FORMAT_BYTE_STREAM;
+		meta->frame.format = VDEF_H264_BYTE_STREAM;
 
 		vbuf_unref(in_buf);
 		in_buf = buf;
@@ -623,25 +741,56 @@ static int vdec_videocoremmal_buffer_push_one(struct vdec_videocoremmal *self,
 		in_buf, self->base, NULL, NULL, (uint8_t **)&in_meta);
 	if (ret < 0)
 		goto out;
-	if (in_meta->format != VDEC_INPUT_FORMAT_BYTE_STREAM) {
-		ret = -EINVAL;
+	if (in_meta->frame.format != VDEF_H264_BYTE_STREAM) {
+		ret = -ENOSYS;
+		ULOG_ERRNO(
+			"unsupported format: " VDEF_CODED_FORMAT_TO_STR_FMT,
+			-ret,
+			VDEF_CODED_FORMAT_TO_STR_ARG2(in_meta->frame.format));
 		goto out;
 	}
 	time_get_monotonic(&cur_ts);
 	time_timespec_to_us(&cur_ts, &in_meta->dequeue_time);
 
+	if (self->need_sync) {
+		if (vdec_is_sync_frame(in_buf, in_meta)) {
+			ULOGI("frame is a sync point");
+			self->need_sync = 0;
+		} else {
+			if (self->base->config.encoding == VDEF_ENCODING_H264 &&
+			    self->base->config.gen_grey_idr) {
+				ULOGI("frame is not an IDR, "
+				      "generating grey IDR");
+				ret = vdec_videocoremmal_insert_grey_idr(
+					self, in_meta, level, &delta);
+				if (ret < 0) {
+					ULOG_ERRNO(
+						"vdec_videocoremmal_insert_grey_idr",
+						-ret);
+					return ret;
+				}
+				self->need_sync = 0;
+			} else {
+				ULOGI("frame is not a sync point, "
+				      "discarding frame");
+				goto out;
+			}
+		}
+	}
+
 	/* Debug files */
 	if (self->base->dbg.input_bs != NULL) {
-		int dbgret = vdec_dbg_write_h264_frame(
-			self->base->dbg.input_bs, in_buf, in_meta->format);
+		int dbgret = vdec_dbg_write_frame(self->base->dbg.input_bs,
+						  in_buf,
+						  &in_meta->frame.format);
 		if (dbgret < 0)
-			ULOG_ERRNO("vdec_dbg_write_h264_frame", -dbgret);
+			ULOG_ERRNO("vdec_dbg_write_frame", -dbgret);
 	}
-	if (self->base->dbg.h264_analysis != NULL) {
-		int dbgret = vdec_dbg_parse_h264_frame(
-			self->base, in_buf, in_meta->format);
+	if (self->base->dbg.analysis != NULL) {
+		int dbgret = vdec_dbg_parse_frame(
+			self->base, in_buf, in_meta->frame.format);
 		if (dbgret < 0)
-			ULOG_ERRNO("vdec_dbg_parse_h264_frame", -dbgret);
+			ULOG_ERRNO("vdec_dbg_parse_frame", -dbgret);
 	}
 
 	/* Send the input buffer for decoding */
@@ -655,9 +804,9 @@ static int vdec_videocoremmal_buffer_push_one(struct vdec_videocoremmal *self,
 	mmal_buf->length = vbuf_get_size(in_buf);
 	mmal_buf->offset = 0;
 	mmal_buf->flags = MMAL_BUFFER_HEADER_FLAG_FRAME;
-	mmal_buf->pts = in_meta->timestamp;
-	self->last_input_pts = in_meta->timestamp;
-	mmal_buf->dts = in_meta->timestamp;
+	mmal_buf->pts = in_meta->frame.info.timestamp + delta;
+	self->last_input_pts = in_meta->frame.info.timestamp + delta;
+	mmal_buf->dts = in_meta->frame.info.timestamp + delta;
 	mmal_buf->user_data = in_buf;
 	ret = vbuf_ref(in_buf);
 	if (ret < 0) {
@@ -716,7 +865,7 @@ static int vdec_videocoremmal_format_changed(struct vdec_videocoremmal *self,
 	mmal_format_copy(format_out, ev->format);
 
 	/* Set the format of the output port */
-	if (self->output_format == VDEC_OUTPUT_FORMAT_MMAL_OPAQUE) {
+	if (vdef_raw_format_cmp(&self->output_format, &vdef_mmal_opaque)) {
 		format_out->encoding = MMAL_ENCODING_OPAQUE;
 		status = mmal_port_parameter_set_boolean(
 			self->decoder->output[0],
@@ -800,7 +949,8 @@ static int vdec_videocoremmal_buffer_pop_all(struct vdec_videocoremmal *self)
 				b, self->base, NULL, NULL, (uint8_t **)&m);
 
 			if ((ret == 0) && (m) &&
-			    ((unsigned)buffer->pts == m->timestamp)) {
+			    ((unsigned)buffer->pts ==
+			     m->frame.info.timestamp)) {
 				in_buf = b;
 				in_meta = m;
 				break;
@@ -809,7 +959,7 @@ static int vdec_videocoremmal_buffer_pop_all(struct vdec_videocoremmal *self)
 					ULOGD("discarded input buffer with "
 					      "TS %" PRIu64
 					      " (expected %" PRIu64 ")",
-					      m->timestamp,
+					      m->frame.info.timestamp,
 					      buffer->pts);
 				}
 				vbuf_unref(b);
@@ -863,8 +1013,11 @@ static int vdec_videocoremmal_buffer_pop_all(struct vdec_videocoremmal *self)
 		    (!self->base->config.output_silent_frames)) {
 			ULOGD("silent frame (ignored)");
 		} else {
-			(*self->base->cbs.frame_output)(
-				self->base, 0, out_buf, self->base->userdata);
+			ret = vbuf_queue_push(self->out_queue, out_buf);
+			if (ret < 0) {
+				ULOG_ERRNO("vbuf_queue_push:output", -ret);
+				return ret;
+			}
 		}
 
 	/* codecheck_ignore[INDENTED_LABEL] */
@@ -912,6 +1065,8 @@ static void *vdec_videocoremmal_decoder_thread(void *ptr)
 			ret = vdec_videocoremmal_do_flush(self);
 			if (ret < 0)
 				ULOG_ERRNO("vdec_videocoremmal_do_flush", -ret);
+			if (self->base->config.encoding == VDEF_ENCODING_H264)
+				self->need_sync = 1;
 			goto pop;
 		}
 
@@ -976,13 +1131,163 @@ static void *vdec_videocoremmal_decoder_thread(void *ptr)
 }
 
 
-uint32_t vdec_videocoremmal_get_supported_input_format(void)
+static int get_supported_input_formats(const struct vdef_coded_format **formats)
 {
-	return VDEC_INPUT_FORMAT_BYTE_STREAM;
+	(void)pthread_once(&supported_formats_is_init,
+			   initialize_supported_formats);
+	*formats = supported_formats;
+	return NB_SUPPORTED_FORMATS;
 }
 
 
-int vdec_videocoremmal_new(struct vdec_decoder *base)
+static int stop(struct vdec_decoder *base)
+{
+	int ret;
+	struct vdec_videocoremmal *self;
+
+	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+
+	self = base->derived;
+
+	/* Stop the decoding thread */
+	self->should_stop = 1;
+	base->configured = 0;
+	if (self->out_pool != NULL) {
+		ret = vbuf_pool_abort(self->out_pool);
+		if (ret < 0)
+			ULOG_ERRNO("vbuf_pool_abort:output", -ret);
+	}
+	if (self->out_queue != NULL) {
+		ret = vbuf_queue_abort(self->out_queue);
+		if (ret < 0)
+			ULOG_ERRNO("vbuf_queue_abort:output", -ret);
+	}
+	if (self->decoder_queue != NULL) {
+		ret = vbuf_queue_abort(self->decoder_queue);
+		if (ret < 0)
+			ULOG_ERRNO("vbuf_queue_abort:decoder", -ret);
+	}
+	if (self->in_queue != NULL) {
+		ret = vbuf_queue_abort(self->in_queue);
+		if (ret < 0)
+			ULOG_ERRNO("vbuf_queue_abort:input", -ret);
+	}
+	if (self->in_pool != NULL) {
+		ret = vbuf_pool_abort(self->in_pool);
+		if (ret < 0)
+			ULOG_ERRNO("vbuf_pool_abort:input", -ret);
+	}
+
+	return 0;
+}
+
+
+static int destroy(struct vdec_decoder *base)
+{
+	int err;
+	MMAL_STATUS_T status;
+	struct vdec_videocoremmal *self;
+
+	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+
+	self = base->derived;
+	if (self == NULL)
+		return 0;
+
+	/* Stop and join the output thread */
+	err = stop(base);
+	if (err < 0)
+		ULOG_ERRNO("vdec_videocoremmal_stop", -err);
+	if (self->thread_launched) {
+		err = pthread_join(self->thread, NULL);
+		if (err != 0)
+			ULOG_ERRNO("pthread_join", err);
+	}
+
+	/* Free the resources */
+	if (self->out_pool != NULL) {
+		err = vbuf_pool_abort(self->out_pool);
+		if (err < 0)
+			ULOG_ERRNO("vbuf_pool_abort:output", -err);
+		err = vbuf_pool_destroy(self->out_pool);
+		if (err < 0)
+			ULOG_ERRNO("vbuf_pool_destroy:output", -err);
+	}
+	if (self->out_queue_evt != NULL) {
+		err = pomp_evt_detach_from_loop(self->out_queue_evt,
+						base->loop);
+		if (err < 0)
+			ULOG_ERRNO("pomp_evt_detach_from_loop", -err);
+	}
+	if (self->out_queue != NULL) {
+		err = vbuf_queue_abort(self->out_queue);
+		if (err < 0)
+			ULOG_ERRNO("vbuf_queue_abort:output", -err);
+		err = vbuf_queue_destroy(self->out_queue);
+		if (err < 0)
+			ULOG_ERRNO("vbuf_queue_destroy:output", -err);
+	}
+	if (self->decoder_queue != NULL) {
+		err = vbuf_queue_abort(self->decoder_queue);
+		if (err < 0)
+			ULOG_ERRNO("vbuf_queue_abort:decoder", -err);
+		err = vbuf_queue_destroy(self->decoder_queue);
+		if (err < 0)
+			ULOG_ERRNO("vbuf_queue_destroy:decoder", -err);
+	}
+	if (self->in_queue != NULL) {
+		err = vbuf_queue_abort(self->in_queue);
+		if (err < 0)
+			ULOG_ERRNO("vbuf_queue_abort:input", -err);
+		err = vbuf_queue_destroy(self->in_queue);
+		if (err < 0)
+			ULOG_ERRNO("vbuf_queue_destroy:input", -err);
+	}
+	if (self->in_pool != NULL) {
+		err = vbuf_pool_abort(self->in_pool);
+		if (err < 0)
+			ULOG_ERRNO("vbuf_pool_abort:input", -err);
+		err = vbuf_pool_destroy(self->in_pool);
+		if (err < 0)
+			ULOG_ERRNO("vbuf_pool_destroy:input", -err);
+	}
+	if (self->mbox != NULL) {
+		err = pomp_loop_remove(base->loop,
+				       mbox_get_read_fd(self->mbox));
+		if (err < 0)
+			ULOG_ERRNO("pomp_loop_remove", -err);
+		mbox_destroy(self->mbox);
+	}
+	if (self->decoder) {
+		status = mmal_component_destroy(self->decoder);
+		if (status != MMAL_SUCCESS) {
+			ULOG_ERRNO(
+				"mmal_component_destroy "
+				"mmal_status=%d",
+				EPROTO,
+				status);
+		}
+	}
+	if (self->mmal_in_pool != NULL)
+		mmal_pool_destroy(self->mmal_in_pool);
+	if (self->mmal_out_pool != NULL) {
+		if (self->output_format == VDEF_BCM_MMAL_OPAQUE) {
+			mmal_port_pool_destroy(self->decoder->output[0],
+					       self->mmal_out_pool);
+		} else {
+			mmal_pool_destroy(self->mmal_out_pool);
+		}
+	}
+	if (self->mmal_out_queue)
+		mmal_queue_destroy(self->mmal_out_queue);
+	mmal_vc_deinit();
+	free(self);
+
+	return 0;
+}
+
+
+static int create(struct vdec_decoder *base)
 {
 	int ret = 0;
 	struct vdec_videocoremmal *self = NULL;
@@ -991,19 +1296,9 @@ int vdec_videocoremmal_new(struct vdec_decoder *base)
 	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
 	/* Check the configuration */
-	if (base->config.encoding != VDEC_ENCODING_H264) {
+	if (base->config.encoding != VDEF_ENCODING_H264) {
 		ret = -EINVAL;
 		ULOG_ERRNO("invalid encoding", -ret);
-		return ret;
-	}
-	if ((!base->config.sync_decoding) && (base->cbs.frame_output == NULL)) {
-		ret = -EINVAL;
-		ULOG_ERRNO("invalid frame output callback", -ret);
-		return ret;
-	}
-	if (base->config.sync_decoding) {
-		ret = -EINVAL;
-		ULOG_ERRNO("synchronized decoding is not supported", -ret);
 		return ret;
 	}
 
@@ -1011,12 +1306,12 @@ int vdec_videocoremmal_new(struct vdec_decoder *base)
 	if (self == NULL)
 		return -ENOMEM;
 	self->base = base;
-	base->derived = (struct vdec_derived *)self;
+	base->derived = self;
 
-	self->output_format = (base->config.preferred_output_format ==
-			       VDEC_OUTPUT_FORMAT_MMAL_OPAQUE)
-				      ? VDEC_OUTPUT_FORMAT_MMAL_OPAQUE
-				      : VDEC_OUTPUT_FORMAT_I420;
+	self->output_format =
+		(base->config.preferred_output_format == VDEF_BCM_MMAL_OPAQUE)
+			? VDEF_BCM_MMAL_OPAQUE
+			: VDEF_I420;
 
 	/* Initialize the VideoCore */
 	status = mmal_vc_init();
@@ -1049,6 +1344,23 @@ int vdec_videocoremmal_new(struct vdec_decoder *base)
 	      MMAL_VERSION_MINOR,
 	      MMAL_COMPONENT_DEFAULT_VIDEO_DECODER);
 
+	/* Initialize the mailbox for inter-thread messages  */
+	self->mbox = mbox_new(1);
+	if (self->mbox == NULL) {
+		ret = -ENOMEM;
+		ULOG_ERRNO("mbox_new", -ret);
+		goto error;
+	}
+	ret = pomp_loop_add(base->loop,
+			    mbox_get_read_fd(self->mbox),
+			    POMP_FD_EVENT_IN,
+			    &mbox_cb,
+			    self);
+	if (ret < 0) {
+		ULOG_ERRNO("pomp_loop_add", -ret);
+		goto error;
+	}
+
 	/* Create the input buffers queue */
 	ret = vbuf_queue_new(0, 0, &self->in_queue);
 	if (ret < 0) {
@@ -1062,6 +1374,28 @@ int vdec_videocoremmal_new(struct vdec_decoder *base)
 		ULOG_ERRNO("vbuf_queue_new:decoder", -ret);
 		goto error;
 	}
+
+	/* Create the ouput buffers queue */
+	ret = vbuf_queue_new(0, 0, &self->out_queue);
+	if (ret < 0) {
+		ULOG_ERRNO("vbuf_queue_new:output", -ret);
+		goto error;
+	}
+	self->out_queue_evt = vbuf_queue_get_evt(self->out_queue);
+	if (self->out_queue_evt == NULL) {
+		ret = -ENODEV;
+		ULOG_ERRNO("vbuf_queue_get_evt", -ret);
+		goto error;
+	}
+	ret = pomp_evt_attach_to_loop(
+		self->out_queue_evt, base->loop, &out_queue_evt_cb, self);
+	if (ret < 0) {
+		ULOG_ERRNO("pomp_evt_attach_to_loop", -ret);
+		goto error;
+	}
+
+	if (self->base->config.encoding == VDEF_ENCODING_H264)
+		self->need_sync = 1;
 
 	/* Create the decoder thread */
 	ret = pthread_create(&self->thread,
@@ -1080,19 +1414,19 @@ int vdec_videocoremmal_new(struct vdec_decoder *base)
 
 error:
 	/* Cleanup on error */
-	vdec_videocoremmal_destroy(base);
+	destroy(base);
 	base->derived = NULL;
 	return ret;
 }
 
 
-int vdec_videocoremmal_flush(struct vdec_decoder *base, int discard)
+static int flush(struct vdec_decoder *base, int discard)
 {
 	struct vdec_videocoremmal *self;
 
 	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
-	self = (struct vdec_videocoremmal *)base->derived;
+	self = base->derived;
 
 	self->flush = 1;
 	self->flush_discard = discard;
@@ -1101,137 +1435,15 @@ int vdec_videocoremmal_flush(struct vdec_decoder *base, int discard)
 }
 
 
-int vdec_videocoremmal_stop(struct vdec_decoder *base)
-{
-	int ret;
-	struct vdec_videocoremmal *self;
-
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
-
-	self = (struct vdec_videocoremmal *)base->derived;
-
-	/* Stop the decoding thread */
-	self->should_stop = 1;
-	base->configured = 0;
-	if (self->out_pool != NULL) {
-		ret = vbuf_pool_abort(self->out_pool);
-		if (ret < 0)
-			ULOG_ERRNO("vbuf_pool_abort:output", -ret);
-	}
-	if (self->decoder_queue != NULL) {
-		ret = vbuf_queue_abort(self->decoder_queue);
-		if (ret < 0)
-			ULOG_ERRNO("vbuf_queue_abort:decoder", -ret);
-	}
-	if (self->in_queue != NULL) {
-		ret = vbuf_queue_abort(self->in_queue);
-		if (ret < 0)
-			ULOG_ERRNO("vbuf_queue_abort:input", -ret);
-	}
-	if (self->in_pool != NULL) {
-		ret = vbuf_pool_abort(self->in_pool);
-		if (ret < 0)
-			ULOG_ERRNO("vbuf_pool_abort:input", -ret);
-	}
-
-	return 0;
-}
-
-
-int vdec_videocoremmal_destroy(struct vdec_decoder *base)
-{
-	int err;
-	MMAL_STATUS_T status;
-	struct vdec_videocoremmal *self;
-
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
-
-	self = (struct vdec_videocoremmal *)base->derived;
-	if (self == NULL)
-		return 0;
-
-	/* Stop and join the output thread */
-	err = vdec_videocoremmal_stop(base);
-	if (err < 0)
-		ULOG_ERRNO("vdec_videocoremmal_stop", -err);
-	if (self->thread_launched) {
-		err = pthread_join(self->thread, NULL);
-		if (err != 0)
-			ULOG_ERRNO("pthread_join", err);
-	}
-
-	/* Free the resources */
-	if (self->out_pool != NULL) {
-		err = vbuf_pool_abort(self->out_pool);
-		if (err < 0)
-			ULOG_ERRNO("vbuf_pool_abort:output", -err);
-		err = vbuf_pool_destroy(self->out_pool);
-		if (err < 0)
-			ULOG_ERRNO("vbuf_pool_destroy:output", -err);
-	}
-	if (self->decoder_queue != NULL) {
-		err = vbuf_queue_abort(self->decoder_queue);
-		if (err < 0)
-			ULOG_ERRNO("vbuf_queue_abort:decoder", -err);
-		err = vbuf_queue_destroy(self->decoder_queue);
-		if (err < 0)
-			ULOG_ERRNO("vbuf_queue_destroy:decoder", -err);
-	}
-	if (self->in_queue != NULL) {
-		err = vbuf_queue_abort(self->in_queue);
-		if (err < 0)
-			ULOG_ERRNO("vbuf_queue_abort:input", -err);
-		err = vbuf_queue_destroy(self->in_queue);
-		if (err < 0)
-			ULOG_ERRNO("vbuf_queue_destroy:input", -err);
-	}
-	if (self->in_pool != NULL) {
-		err = vbuf_pool_abort(self->in_pool);
-		if (err < 0)
-			ULOG_ERRNO("vbuf_pool_abort:input", -err);
-		err = vbuf_pool_destroy(self->in_pool);
-		if (err < 0)
-			ULOG_ERRNO("vbuf_pool_destroy:input", -err);
-	}
-	if (self->decoder) {
-		status = mmal_component_destroy(self->decoder);
-		if (status != MMAL_SUCCESS) {
-			ULOG_ERRNO(
-				"mmal_component_destroy "
-				"mmal_status=%d",
-				EPROTO,
-				status);
-		}
-	}
-	if (self->mmal_in_pool != NULL)
-		mmal_pool_destroy(self->mmal_in_pool);
-	if (self->mmal_out_pool != NULL) {
-		if (self->output_format == VDEC_OUTPUT_FORMAT_MMAL_OPAQUE) {
-			mmal_port_pool_destroy(self->decoder->output[0],
-					       self->mmal_out_pool);
-		} else {
-			mmal_pool_destroy(self->mmal_out_pool);
-		}
-	}
-	if (self->mmal_out_queue)
-		mmal_queue_destroy(self->mmal_out_queue);
-	mmal_vc_deinit();
-	free(self);
-
-	return 0;
-}
-
-
-int vdec_videocoremmal_set_sps_pps(struct vdec_decoder *base,
-				   const uint8_t *sps,
-				   size_t sps_size,
-				   const uint8_t *pps,
-				   size_t pps_size,
-				   enum vdec_input_format format)
+static int set_h264_ps(struct vdec_decoder *base,
+		       const uint8_t *sps,
+		       size_t sps_size,
+		       const uint8_t *pps,
+		       size_t pps_size,
+		       const struct vdef_coded_format *format)
 {
 	int ret = 0, err;
 	struct vdec_videocoremmal *self;
-	size_t offset = (format == VDEC_INPUT_FORMAT_RAW_NALU) ? 0 : 4;
 	size_t ps_size, off;
 	struct vbuf_cbs buf_cbs;
 	MMAL_STATUS_T status;
@@ -1239,26 +1451,34 @@ int vdec_videocoremmal_set_sps_pps(struct vdec_decoder *base,
 	MMAL_ES_FORMAT_T *format_out = NULL;
 	unsigned int output_size;
 
+	ULOG_ERRNO_RETURN_ERR_IF(format == NULL, EINVAL);
+	size_t offset = (format->data_format == VDEF_CODED_DATA_FORMAT_RAW_NALU)
+				? 0
+				: 4;
+
 	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF((sps == NULL) || (sps_size <= offset), EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF((pps == NULL) || (pps_size <= offset), EINVAL);
 
-	self = (struct vdec_videocoremmal *)base->derived;
+	self = base->derived;
 
-	self->stride = base->width;
-	output_size = ((base->width + 31) & ~31) * ((base->height + 15) & ~15) *
-		      3 / 2;
+	self->stride = base->video_info.resolution.width;
+	output_size = VDEF_ALIGN(base->video_info.resolution.width, 32) *
+		      VDEF_ALIGN(base->video_info.resolution.height, 16) * 3 /
+		      2;
 
 	/* Set the format of the video decoder input port */
 	format_in = self->decoder->input[0]->format;
 	format_in->type = MMAL_ES_TYPE_VIDEO;
 	format_in->encoding = MMAL_ENCODING_H264;
-	format_in->es->video.width = (base->width + 31) & ~31;
-	format_in->es->video.height = (base->height + 15) & ~15;
-	format_in->es->video.frame_rate.num = 30;
+	format_in->es->video.width =
+		VDEF_ALIGN(base->video_info.resolution.width, 32)
+			format_in->es->video.height =
+			VDEF_ALIGN(base->video_info.resolution.height, 16)
+				format_in->es->video.frame_rate.num = 30;
 	format_in->es->video.frame_rate.den = 1;
-	format_in->es->video.par.num = base->sar_width;
-	format_in->es->video.par.den = base->sar_height;
+	format_in->es->video.par.num = base->video_info.sar.width;
+	format_in->es->video.par.den = base->video_info.sar.height;
 	format_in->flags = MMAL_ES_FORMAT_FLAG_FRAMED;
 
 	/* Alloc the SPS/PPS buffer for the input format */
@@ -1297,7 +1517,7 @@ int vdec_videocoremmal_set_sps_pps(struct vdec_decoder *base,
 
 	/* Set the format of the video decoder output port */
 	format_out = self->decoder->output[0]->format;
-	if (self->output_format == VDEC_OUTPUT_FORMAT_MMAL_OPAQUE) {
+	if (self->output_format == VDEF_BCM_MMAL_OPAQUE) {
 		format_out->encoding = MMAL_ENCODING_OPAQUE;
 		status = mmal_port_parameter_set_boolean(
 			self->decoder->output[0],
@@ -1350,7 +1570,8 @@ int vdec_videocoremmal_set_sps_pps(struct vdec_decoder *base,
 		self->decoder->input[0]->buffer_num =
 			self->decoder->input[0]->buffer_num_recommended;
 	self->decoder->input[0]->buffer_size =
-		base->width * base->height * 3 / 4;
+		base->video_info.resolution.width *
+		base->video_info.resolution.height * 3 / 4;
 	if (self->decoder->input[0]->buffer_size_min >
 	    self->decoder->input[0]->buffer_size)
 		self->decoder->input[0]->buffer_size =
@@ -1405,7 +1626,7 @@ int vdec_videocoremmal_set_sps_pps(struct vdec_decoder *base,
 	ULOGI("output buffers num=%d size=%d",
 	      self->decoder->output[0]->buffer_num,
 	      self->decoder->output[0]->buffer_size);
-	if (self->output_format == VDEC_OUTPUT_FORMAT_MMAL_OPAQUE) {
+	if (self->output_format == VDEF_BCM_MMAL_OPAQUE) {
 		self->mmal_out_pool = mmal_port_pool_create(
 			self->decoder->output[0],
 			self->decoder->output[0]->buffer_num,
@@ -1499,7 +1720,7 @@ error:
 		self->mmal_in_pool = NULL;
 	}
 	if (self->mmal_out_pool != NULL) {
-		if (self->output_format == VDEC_OUTPUT_FORMAT_MMAL_OPAQUE) {
+		if (self->output_format == VDEF_BCM_MMAL_OPAQUE) {
 			mmal_port_pool_destroy(self->decoder->output[0],
 					       self->mmal_out_pool);
 		} else {
@@ -1511,38 +1732,50 @@ error:
 }
 
 
-struct vbuf_pool *
-vdec_videocoremmal_get_input_buffer_pool(struct vdec_decoder *base)
+static int set_h265_ps(struct vdec_decoder *base,
+		       const uint8_t *vps,
+		       size_t vps_size,
+		       const uint8_t *sps,
+		       size_t sps_size,
+		       const uint8_t *pps,
+		       size_t pps_size,
+		       const struct vdef_coded_format *format)
+{
+	return -ENOSYS;
+}
+
+
+static struct vbuf_pool *get_input_buffer_pool(struct vdec_decoder *base)
 {
 	struct vdec_videocoremmal *self;
 
 	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
 
-	self = (struct vdec_videocoremmal *)base->derived;
+	self = base->derived;
 
 	return self->in_pool;
 }
 
 
-struct vbuf_queue *
-vdec_videocoremmal_get_input_buffer_queue(struct vdec_decoder *base)
+static struct vbuf_queue *get_input_buffer_queue(struct vdec_decoder *base)
 {
 	struct vdec_videocoremmal *self;
 
 	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
 
-	self = (struct vdec_videocoremmal *)base->derived;
+	self = base->derived;
 
 	return self->in_queue;
 }
 
-
-int vdec_videocoremmal_sync_decode(struct vdec_decoder *base,
-				   struct vbuf_buffer *in_buf,
-				   struct vbuf_buffer **out_buf)
-{
-	/* Synchronized decoding is not supported */
-	return -ENOSYS;
-}
-
-#endif /* BUILD_MMAL */
+const struct vdec_ops vdec_videocoremmal_ops = {
+	.get_supported_input_formats = get_supported_input_formats,
+	.create = create,
+	.flush = flush,
+	.stop = stop,
+	.destroy = destroy,
+	.set_h264_ps = set_h264_ps,
+	.set_h265_ps = set_h265_ps,
+	.get_input_buffer_pool = get_input_buffer_pool,
+	.get_input_buffer_queue = get_input_buffer_queue,
+};

@@ -24,67 +24,64 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VDEC_PRIV_H_
-#define _VDEC_PRIV_H_
+#ifndef _VDEC_VIDEOTOOLBOX_PRIV_H_
+#define _VDEC_VIDEOTOOLBOX_PRIV_H_
 
-#define _GNU_SOURCE
-#include <errno.h>
-#include <inttypes.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <ulog.h>
+#include <arpa/inet.h>
 
-#ifdef _WIN32
-#	include <winsock2.h>
-#else /* !_WIN32 */
-#	include <arpa/inet.h>
-#endif /* !_WIN32 */
+#include <VideoToolbox/VideoToolbox.h>
 
 #include <futils/futils.h>
-#include <h264/h264.h>
-#include <h265/h265.h>
-#include <video-decode/vdec.h>
+#include <media-buffers/mbuf_coded_video_frame.h>
+#include <media-buffers/mbuf_mem.h>
+#include <media-buffers/mbuf_mem_generic.h>
+#include <media-buffers/mbuf_raw_video_frame.h>
+#include <video-decode/vdec_core.h>
 #include <video-decode/vdec_internal.h>
+#include <video-decode/vdec_videotoolbox.h>
 
-#ifdef BUILD_LIBVIDEO_DECODE_FFMPEG
-#	include <video-decode/vdec_ffmpeg.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_MEDIACODEC
-#	include <video-decode/vdec_mediacodec.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOCOREMMAL
-#	include <video-decode/vdec_videocoremmal.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOTOOLBOX
-#	include <video-decode/vdec_videotoolbox.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_HISI
-#	include <video-decode/vdec_hisi.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_AML
-#	include <video-decode/vdec_aml.h>
-#endif
+#include <pthread.h>
 
 
-static inline void xfree(void **ptr)
-{
-	if (ptr) {
-		free(*ptr);
-		*ptr = NULL;
-	}
-}
+#define VDEC_VIDEOTOOLBOX_OUT_POOL_DEFAULT_MIN_BUF_COUNT 10
 
 
-static inline char *xstrdup(const char *s)
-{
-	return s == NULL ? NULL : strdup(s);
-}
+enum vdec_videotoolbox_message_type {
+	VDEC_VIDEOTOOLBOX_MESSAGE_TYPE_FLUSH = 'f',
+	VDEC_VIDEOTOOLBOX_MESSAGE_TYPE_STOP = 's',
+	VDEC_VIDEOTOOLBOX_MESSAGE_TYPE_ERROR = 'e',
+};
 
 
-#endif /* !_VDEC_PRIV_H_ */
+struct vdec_videotoolbox_message {
+	enum vdec_videotoolbox_message_type type;
+	int error;
+};
+
+
+struct vdec_videotoolbox {
+	struct vdec_decoder *base;
+	struct mbuf_coded_video_frame_queue *in_queue;
+	struct mbuf_raw_video_frame_queue *out_queue;
+	struct pomp_evt *out_queue_evt;
+	CMVideoFormatDescriptionRef format_desc_ref;
+	VTDecompressionSessionRef decompress_ref;
+	int flushing;
+
+	pthread_t thread;
+	int thread_launched;
+	int should_stop;
+	int flush;
+	int flush_discard;
+	struct mbox *mbox;
+	int need_sync;
+};
+
+
+struct vdec_videotoolbox_cvbuffer {
+	CVBufferRef ref;
+	CVPixelBufferLockFlags lock_flags;
+	int cpu_locked;
+};
+
+#endif /* !_VDEC_VIDEOTOOLBOX_PRIV_H_ */

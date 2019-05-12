@@ -24,67 +24,63 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VDEC_PRIV_H_
-#define _VDEC_PRIV_H_
+#ifndef _VDEC_VIDEOCOREMMAL_PRIV_H_
+#define _VDEC_VIDEOCOREMMAL_PRIV_H_
 
-#define _GNU_SOURCE
-#include <errno.h>
-#include <inttypes.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <ulog.h>
+#include <arpa/inet.h>
 
-#ifdef _WIN32
-#	include <winsock2.h>
-#else /* !_WIN32 */
-#	include <arpa/inet.h>
-#endif /* !_WIN32 */
+#include <interface/mmal/mmal.h>
+#include <interface/mmal/util/mmal_default_components.h>
+#include <interface/mmal/util/mmal_util.h>
+#include <interface/mmal/util/mmal_util_params.h>
+#include <interface/mmal/vc/mmal_vc_api.h>
 
-#include <futils/futils.h>
-#include <h264/h264.h>
-#include <h265/h265.h>
-#include <video-decode/vdec.h>
+#include <video-buffers/vbuf_internals.h>
+#include <video-decode/vdec_core.h>
 #include <video-decode/vdec_internal.h>
-
-#ifdef BUILD_LIBVIDEO_DECODE_FFMPEG
-#	include <video-decode/vdec_ffmpeg.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_MEDIACODEC
-#	include <video-decode/vdec_mediacodec.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOCOREMMAL
-#	include <video-decode/vdec_videocoremmal.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOTOOLBOX
-#	include <video-decode/vdec_videotoolbox.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_HISI
-#	include <video-decode/vdec_hisi.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_AML
-#	include <video-decode/vdec_aml.h>
-#endif
+#include <video-decode/vdec_videocoremmal.h>
 
 
-static inline void xfree(void **ptr)
-{
-	if (ptr) {
-		free(*ptr);
-		*ptr = NULL;
-	}
-}
+#define VDEC_VIDEOCOREMMAL_OUT_BUFFERS_COUNT 20
+#define VDEC_VIDEOCOREMMAL_OUT_NUM_EXTRA_BUFFERS 20
+#define VDEC_VIDEOCOREMMAL_BUF_TYPE_MMAL 0x4D4D414C /* "MDCD" */
+
+#define VDEC_MSG_FLUSH 'f'
+#define VDEC_MSG_STOP 's'
 
 
-static inline char *xstrdup(const char *s)
-{
-	return s == NULL ? NULL : strdup(s);
-}
+struct vdec_videocoremmal {
+	struct vdec_decoder *base;
+	struct vbuf_pool *in_pool;
+	struct vbuf_queue *in_queue;
+	struct vbuf_queue *decoder_queue;
+	struct vbuf_pool *out_pool;
+	struct vbuf_queue *out_queue;
+	struct pomp_evt *out_queue_evt;
+	MMAL_COMPONENT_T *decoder;
+	MMAL_POOL_T *mmal_in_pool;
+	MMAL_POOL_T *mmal_out_pool;
+	MMAL_QUEUE_T *mmal_out_queue;
+	int flushing;
+	uint64_t last_input_pts;
+	uint64_t last_output_pts;
+
+	pthread_t thread;
+	int thread_launched;
+	int should_stop;
+	int flush;
+	int flush_discard;
+	struct mbox *mbox;
+	int need_sync;
+
+	struct vdef_raw_format output_format;
+	unsigned int stride;
+};
 
 
-#endif /* !_VDEC_PRIV_H_ */
+struct vdec_videocoremmal_mmalbuf {
+	MMAL_BUFFER_HEADER_T *mmal_buf;
+};
+
+
+#endif /* !_VDEC_VIDEOCOREMMAL_PRIV_H_ */

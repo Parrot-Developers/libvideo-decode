@@ -24,67 +24,55 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VDEC_PRIV_H_
-#define _VDEC_PRIV_H_
-
-#define _GNU_SOURCE
-#include <errno.h>
-#include <inttypes.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <ulog.h>
-
-#ifdef _WIN32
-#	include <winsock2.h>
-#else /* !_WIN32 */
-#	include <arpa/inet.h>
-#endif /* !_WIN32 */
-
-#include <futils/futils.h>
-#include <h264/h264.h>
-#include <h265/h265.h>
-#include <video-decode/vdec.h>
-#include <video-decode/vdec_internal.h>
-
-#ifdef BUILD_LIBVIDEO_DECODE_FFMPEG
-#	include <video-decode/vdec_ffmpeg.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_MEDIACODEC
-#	include <video-decode/vdec_mediacodec.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOCOREMMAL
-#	include <video-decode/vdec_videocoremmal.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOTOOLBOX
-#	include <video-decode/vdec_videotoolbox.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_HISI
-#	include <video-decode/vdec_hisi.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_AML
-#	include <video-decode/vdec_aml.h>
-#endif
+#define ULOG_TAG vdec_core
+#include "vdec_core_priv.h"
 
 
-static inline void xfree(void **ptr)
+const char *vdec_decoder_implem_str(enum vdec_decoder_implem implem)
 {
-	if (ptr) {
-		free(*ptr);
-		*ptr = NULL;
+	switch (implem) {
+	case VDEC_DECODER_IMPLEM_FFMPEG:
+		return "FFMPEG";
+	case VDEC_DECODER_IMPLEM_MEDIACODEC:
+		return "MEDIACODEC";
+	case VDEC_DECODER_IMPLEM_VIDEOTOOLBOX:
+		return "VIDEOTOOLBOX";
+	case VDEC_DECODER_IMPLEM_VIDEOCOREMMAL:
+		return "VIDEOCOREMMAL";
+	case VDEC_DECODER_IMPLEM_HISI:
+		return "HISI";
+	default:
+		return "UNKNOWN";
 	}
 }
 
 
-static inline char *xstrdup(const char *s)
+struct vdec_config_impl *
+vdec_config_get_specific(struct vdec_config *config,
+			 enum vdec_decoder_implem implem)
 {
-	return s == NULL ? NULL : strdup(s);
+	/* Check if specific config is present */
+	if (!config->implem_cfg)
+		return NULL;
+
+	/* Check if implementation is the right one */
+	if (config->implem != implem) {
+		ULOGI("specific config found, but implementation is %s "
+		      "instead of %s. ignoring specific config",
+		      vdec_decoder_implem_str(config->implem),
+		      vdec_decoder_implem_str(implem));
+		return NULL;
+	}
+
+	/* Check if specific config implementation matches the base one */
+	if (config->implem_cfg->implem != config->implem) {
+		ULOGW("specific config implem (%s) does not match"
+		      " base config implem (%s). ignoring specific config",
+		      vdec_decoder_implem_str(config->implem_cfg->implem),
+		      vdec_decoder_implem_str(config->implem));
+		return NULL;
+	}
+
+	/* All tests passed, return specific config */
+	return config->implem_cfg;
 }
-
-
-#endif /* !_VDEC_PRIV_H_ */

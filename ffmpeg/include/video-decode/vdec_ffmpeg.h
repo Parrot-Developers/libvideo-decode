@@ -24,67 +24,36 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VDEC_PRIV_H_
-#define _VDEC_PRIV_H_
+#ifndef _VDEC_FFMPEG_H_
+#define _VDEC_FFMPEG_H_
 
-#define _GNU_SOURCE
-#include <errno.h>
-#include <inttypes.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <ulog.h>
+#include <video-decode/vdec_core.h>
 
-#ifdef _WIN32
-#	include <winsock2.h>
-#else /* !_WIN32 */
-#	include <arpa/inet.h>
-#endif /* !_WIN32 */
+#ifdef __cplusplus
+extern "C" {
+#endif /* __cplusplus */
 
-#include <futils/futils.h>
-#include <h264/h264.h>
-#include <h265/h265.h>
-#include <video-decode/vdec.h>
-#include <video-decode/vdec_internal.h>
-
-#ifdef BUILD_LIBVIDEO_DECODE_FFMPEG
-#	include <video-decode/vdec_ffmpeg.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_MEDIACODEC
-#	include <video-decode/vdec_mediacodec.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOCOREMMAL
-#	include <video-decode/vdec_videocoremmal.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOTOOLBOX
-#	include <video-decode/vdec_videotoolbox.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_HISI
-#	include <video-decode/vdec_hisi.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_AML
-#	include <video-decode/vdec_aml.h>
-#endif
+/* To be used for all public API */
+#ifdef VDEC_API_EXPORTS
+#	ifdef _WIN32
+#		define VDEC_API __declspec(dllexport)
+#	else /* !_WIN32 */
+#		define VDEC_API __attribute__((visibility("default")))
+#	endif /* !_WIN32 */
+#else /* !VDEC_API_EXPORTS */
+#	define VDEC_API
+#endif /* !VDEC_API_EXPORTS */
 
 
-static inline void xfree(void **ptr)
-{
-	if (ptr) {
-		free(*ptr);
-		*ptr = NULL;
-	}
+struct vdec_ffmpeg;
+
+
+extern VDEC_API const struct vdec_ops vdec_ffmpeg_ops;
+
+
+#ifdef __cplusplus
 }
+#endif /* __cplusplus */
 
 
-static inline char *xstrdup(const char *s)
-{
-	return s == NULL ? NULL : strdup(s);
-}
-
-
-#endif /* !_VDEC_PRIV_H_ */
+#endif /* !_VDEC_FFMPEG_H_ */

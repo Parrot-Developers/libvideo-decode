@@ -24,16 +24,17 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VDEC_PRIV_H_
-#define _VDEC_PRIV_H_
+#ifndef _VDEC_CORE_PRIV_H_
+#define _VDEC_CORE_PRIV_H_
 
 #define _GNU_SOURCE
 #include <errno.h>
 #include <inttypes.h>
-#include <pthread.h>
 #include <stdio.h>
-#include <stdlib.h>
+#include <sys/types.h>
+#include <time.h>
 #include <ulog.h>
+#include <unistd.h>
 
 #ifdef _WIN32
 #	include <winsock2.h>
@@ -43,48 +44,7 @@
 
 #include <futils/futils.h>
 #include <h264/h264.h>
-#include <h265/h265.h>
-#include <video-decode/vdec.h>
+#include <video-decode/vdec_core.h>
 #include <video-decode/vdec_internal.h>
 
-#ifdef BUILD_LIBVIDEO_DECODE_FFMPEG
-#	include <video-decode/vdec_ffmpeg.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_MEDIACODEC
-#	include <video-decode/vdec_mediacodec.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOCOREMMAL
-#	include <video-decode/vdec_videocoremmal.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOTOOLBOX
-#	include <video-decode/vdec_videotoolbox.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_HISI
-#	include <video-decode/vdec_hisi.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_AML
-#	include <video-decode/vdec_aml.h>
-#endif
-
-
-static inline void xfree(void **ptr)
-{
-	if (ptr) {
-		free(*ptr);
-		*ptr = NULL;
-	}
-}
-
-
-static inline char *xstrdup(const char *s)
-{
-	return s == NULL ? NULL : strdup(s);
-}
-
-
-#endif /* !_VDEC_PRIV_H_ */
+#endif /* !_VDEC_CORE_PRIV_H_ */

@@ -24,16 +24,8 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VDEC_PRIV_H_
-#define _VDEC_PRIV_H_
-
-#define _GNU_SOURCE
-#include <errno.h>
-#include <inttypes.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <ulog.h>
+#ifndef _VDEC_FFMPEG_PRIV_H_
+#define _VDEC_FFMPEG_PRIV_H_
 
 #ifdef _WIN32
 #	include <winsock2.h>
@@ -41,50 +33,46 @@
 #	include <arpa/inet.h>
 #endif /* !_WIN32 */
 
-#include <futils/futils.h>
-#include <h264/h264.h>
-#include <h265/h265.h>
-#include <video-decode/vdec.h>
+#include <libavcodec/avcodec.h>
+#include <libavutil/avutil.h>
+#include <libavutil/pixdesc.h>
+#include <pthread.h>
+#include <stdatomic.h>
+
+#include <futils/mbox.h>
+#include <futils/timetools.h>
+#include <media-buffers/mbuf_coded_video_frame.h>
+#include <media-buffers/mbuf_mem.h>
+#include <media-buffers/mbuf_mem_generic.h>
+#include <media-buffers/mbuf_raw_video_frame.h>
+#include <video-decode/vdec_ffmpeg.h>
 #include <video-decode/vdec_internal.h>
 
-#ifdef BUILD_LIBVIDEO_DECODE_FFMPEG
-#	include <video-decode/vdec_ffmpeg.h>
-#endif
+#define VDEC_FFMPEG_DEFAULT_THREAD_COUNT 8
 
-#ifdef BUILD_LIBVIDEO_DECODE_MEDIACODEC
-#	include <video-decode/vdec_mediacodec.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOCOREMMAL
-#	include <video-decode/vdec_videocoremmal.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOTOOLBOX
-#	include <video-decode/vdec_videotoolbox.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_HISI
-#	include <video-decode/vdec_hisi.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_DECODE_AML
-#	include <video-decode/vdec_aml.h>
-#endif
+#define VDEC_MSG_FLUSH 'f'
+#define VDEC_MSG_STOP 's'
 
 
-static inline void xfree(void **ptr)
-{
-	if (ptr) {
-		free(*ptr);
-		*ptr = NULL;
-	}
-}
+struct vdec_ffmpeg {
+	struct vdec_decoder *base;
+	struct mbuf_coded_video_frame_queue *in_queue;
+	struct mbuf_coded_video_frame_queue *decoder_queue;
+	struct mbuf_raw_video_frame_queue *out_queue;
+	struct pomp_evt *out_queue_evt;
+	AVCodecContext *avcodec;
+	AVBufferRef *hw_device_ctx;
+	AVPacket avpacket;
+	AVFrame *dummy_frame;
+	atomic_int flushing;
 
+	pthread_t thread;
+	atomic_int thread_launched;
+	atomic_int should_stop;
+	atomic_int flush;
+	atomic_int flush_discard;
+	struct mbox *mbox;
+	atomic_int need_sync;
+};
 
-static inline char *xstrdup(const char *s)
-{
-	return s == NULL ? NULL : strdup(s);
-}
-
-
-#endif /* !_VDEC_PRIV_H_ */
+#endif /* _VDEC_FFMPEG_PRIV_H_ */

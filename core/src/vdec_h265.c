@@ -24,59 +24,65 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VDEC_FFMPEG_H_
-#define _VDEC_FFMPEG_H_
+#define ULOG_TAG vdec_core
+#include "vdec_core_priv.h"
 
 
-struct vdec_ffmpeg;
+bool vdec_h265_is_idr(struct mbuf_coded_video_frame *frame,
+		      struct vdef_coded_frame *info)
+{
+	int err = 0;
+	int nalu_count;
 
+	ULOG_ERRNO_RETURN_VAL_IF(frame == NULL, EINVAL, false);
+	ULOG_ERRNO_RETURN_VAL_IF(info == NULL, EINVAL, false);
 
-#define VDEC_OPS_FFMPEG                                                        \
-	{                                                                      \
-		.get_supported_input_format =                                  \
-			&vdec_ffmpeg_get_supported_input_format,               \
-		.new = &vdec_ffmpeg_new, .flush = &vdec_ffmpeg_flush,          \
-		.stop = &vdec_ffmpeg_stop, .destroy = &vdec_ffmpeg_destroy,    \
-		.set_sps_pps = &vdec_ffmpeg_set_sps_pps,                       \
-		.get_input_buffer_pool = &vdec_ffmpeg_get_input_buffer_pool,   \
-		.get_input_buffer_queue = &vdec_ffmpeg_get_input_buffer_queue, \
-		.sync_decode = &vdec_ffmpeg_sync_decode,                       \
+	nalu_count = mbuf_coded_video_frame_get_nalu_count(frame);
+	if (nalu_count < 0) {
+		err = nalu_count;
+		ULOG_ERRNO("mbuf_coded_video_frame_get_nalu_count", -err);
+		return false;
 	}
+	for (int i = 0; i < nalu_count; i++) {
+		const void *data;
+		const uint8_t *raw_nalu;
+		struct vdef_nalu nalu;
 
+		err = mbuf_coded_video_frame_get_nalu(frame, i, &data, &nalu);
+		if (err < 0) {
+			ULOG_ERRNO("mbuf_coded_video_frame_get_nalu", -err);
+			return false;
+		}
 
-uint32_t vdec_ffmpeg_get_supported_input_format(void);
+		/* If the type is "unknown", read it from data */
+		if (nalu.h265.type == H265_NALU_TYPE_UNKNOWN) {
+			raw_nalu = data;
+			if (info->format.data_format !=
+			    VDEF_CODED_DATA_FORMAT_RAW_NALU)
+				raw_nalu += 4;
+			nalu.h265.type =
+				(enum h265_nalu_type)((*raw_nalu & 0x3E) >> 1);
+		}
 
+		err = mbuf_coded_video_frame_release_nalu(frame, i, data);
+		if (err < 0) {
+			ULOG_ERRNO("mbuf_coded_video_frame_release_nalu", -err);
+			return false;
+		}
 
-int vdec_ffmpeg_new(struct vdec_decoder *base);
-
-
-int vdec_ffmpeg_flush(struct vdec_decoder *base, int discard);
-
-
-int vdec_ffmpeg_stop(struct vdec_decoder *base);
-
-
-int vdec_ffmpeg_destroy(struct vdec_decoder *base);
-
-
-int vdec_ffmpeg_set_sps_pps(struct vdec_decoder *base,
-			    const uint8_t *sps,
-			    size_t sps_size,
-			    const uint8_t *pps,
-			    size_t pps_size,
-			    enum vdec_input_format format);
-
-
-struct vbuf_pool *vdec_ffmpeg_get_input_buffer_pool(struct vdec_decoder *base);
-
-
-struct vbuf_queue *
-vdec_ffmpeg_get_input_buffer_queue(struct vdec_decoder *base);
-
-
-int vdec_ffmpeg_sync_decode(struct vdec_decoder *base,
-			    struct vbuf_buffer *in_buf,
-			    struct vbuf_buffer **out_buf);
-
-
-#endif /* !_VDEC_FFMPEG_H_ */
+		/* As for each frame, trust the nalu type if given */
+		switch (nalu.h265.type) {
+		case H265_NALU_TYPE_IDR_W_RADL:
+		case H265_NALU_TYPE_IDR_N_LP:
+			return true;
+		case H265_NALU_TYPE_BLA_W_LP:
+		case H265_NALU_TYPE_BLA_W_RADL:
+		case H265_NALU_TYPE_BLA_N_LP:
+		case H265_NALU_TYPE_CRA_NUT:
+			return false;
+		default:
+			break;
+		}
+	}
+	return false;
+}

@@ -1,0 +1,35 @@
+    config VDEC_FFMPEG
+        bool "vdec ffmpeg implementation"
+            default false
+        help
+            Enable the ffmpeg implementation in libvideo-decode.
+
+    config VDEC_MEDIACODEC
+        bool "vdec mediacodec implementation"
+            default false
+        help
+            Enable the MediaCodec (Android) implementation in libvideo-decode.
+
+    config VDEC_VIDEOCOREMMAL
+        bool "vdec videocoremmal implementation"
+            default false
+        help
+            Enable the VideoCore MMAL (RaspberryPi) implementation in libvideo-decode.
+
+    config VDEC_VIDEOTOOLBOX
+        bool "vdec videotoolbox implementation"
+            default false
+        help
+            Enable the VideoToolbox (iOS/macos) implementation in libvideo-decode.
+
+    config VDEC_HISI
+        bool "vdec hisi implementation"
+            default false
+        help
+            Enable the HiSilicon implementation in libvideo-decode.
+
+    config VDEC_AML
+        bool "vdec aml implementation"
+            default false
+        help
+            Enable the Amlogic implementation in libvideo-decode.
