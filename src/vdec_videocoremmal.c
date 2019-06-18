@@ -871,12 +871,14 @@ static int vdec_videocoremmal_buffer_pop_all(struct vdec_videocoremmal *self)
 	out:
 		if (buffer != NULL)
 			mmal_buffer_header_release(buffer);
-		if (out_buf)
+		if (out_buf) {
 			vbuf_unref(out_buf);
-		out_buf = NULL;
-		if (in_buf)
+			out_buf = NULL;
+		}
+		if (in_buf) {
 			vbuf_unref(in_buf);
-		in_buf = NULL;
+			in_buf = NULL;
+		}
 		if (ret == 0)
 			buffer = mmal_queue_get(self->mmal_out_queue);
 	}

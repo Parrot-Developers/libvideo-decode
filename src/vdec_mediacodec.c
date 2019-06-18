@@ -898,7 +898,9 @@ static int vdec_mediacodec_buffer_pop_all(struct vdec_mediacodec *self)
 
 		/* Unref the buffers */
 		vbuf_unref(in_buf);
+		in_buf = NULL;
 		vbuf_unref(out_buf);
+		out_buf = NULL;
 	} while ((!self->flush) && (!self->should_stop));
 
 	return 0;
