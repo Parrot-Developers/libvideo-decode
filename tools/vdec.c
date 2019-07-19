@@ -24,7 +24,6 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -32,8 +31,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <unistd.h>
+
+#ifdef _WIN32
+#	include <winsock2.h>
+#	include <windows.h>
+#else /* !_WIN32 */
+#	include <arpa/inet.h>
+#	include <sys/mman.h>
+#endif /* !_WIN32 */
 
 #include <futils/futils.h>
 #include <h264/h264.h>
@@ -58,7 +64,13 @@ ULOG_DECLARE_TAG(vdec_prog);
 
 
 struct vdec_prog {
+	char *input_file;
+#ifdef _WIN32
+	HANDLE in_file;
+	HANDLE in_file_map;
+#else
 	int in_fd;
+#endif
 	void *in_data;
 	size_t in_size;
 	struct h264_reader *reader;
@@ -87,6 +99,7 @@ struct vdec_prog {
 	int in_pool_allocated;
 	struct vbuf_queue *in_queue;
 	struct vbuf_buffer *in_buf;
+	char *output_file;
 	FILE *out_file;
 	int output_file_y4m;
 	pthread_mutex_t mutex;
@@ -139,6 +152,107 @@ static void usage(char *prog_name)
 	       "1 = no multi-threading, >1 = multi-threading)\n"
 	       "\n",
 	       prog_name);
+}
+
+
+static void unmap_file(struct vdec_prog *self)
+{
+#ifdef _WIN32
+	if (self->in_data != NULL)
+		UnmapViewOfFile(self->in_data);
+	self->in_data = NULL;
+	if (self->in_file_map != INVALID_HANDLE_VALUE)
+		CloseHandle(self->in_file_map);
+	self->in_file_map = INVALID_HANDLE_VALUE;
+	if (self->in_file != INVALID_HANDLE_VALUE)
+		CloseHandle(self->in_file);
+	self->in_file = INVALID_HANDLE_VALUE;
+#else
+	if (self->in_fd >= 0) {
+		if (self->in_data != NULL)
+			munmap(self->in_data, self->in_size);
+		self->in_data = NULL;
+		close(self->in_fd);
+		self->in_fd = -1;
+	}
+#endif
+}
+
+
+static int map_file(struct vdec_prog *self)
+{
+	int res;
+
+#ifdef _WIN32
+	LARGE_INTEGER filesize;
+
+	self->in_file = CreateFileA(self->input_file,
+				    GENERIC_READ,
+				    0,
+				    NULL,
+				    OPEN_EXISTING,
+				    FILE_ATTRIBUTE_NORMAL,
+				    NULL);
+	if (self->in_file == INVALID_HANDLE_VALUE) {
+		res = -EIO;
+		ULOG_ERRNO("CreateFileA('%s')", -res, self->input_file);
+		goto error;
+	}
+
+	self->in_file_map = CreateFileMapping(
+		self->in_file, NULL, PAGE_READONLY, 0, 0, NULL);
+	if (self->in_file_map == INVALID_HANDLE_VALUE) {
+		res = -EIO;
+		ULOG_ERRNO("CreateFileMapping('%s')", -res, self->input_file);
+		goto error;
+	}
+
+	res = GetFileSizeEx(self->in_file, &filesize);
+	if (res == 0) {
+		res = -EIO;
+		ULOG_ERRNO("GetFileSizeEx('%s')", -res, self->input_file);
+		goto error;
+	}
+	self->in_size = filesize.QuadPart;
+
+	self->in_data =
+		MapViewOfFile(self->in_file_map, FILE_MAP_READ, 0, 0, 0);
+	if (self->in_data == NULL) {
+		res = -EIO;
+		ULOG_ERRNO("MapViewOfFile('%s')", -res, self->input_file);
+		goto error;
+	}
+#else
+	/* Try to open input file */
+	self->in_fd = open(self->input_file, O_RDONLY);
+	if (self->in_fd < 0) {
+		res = -errno;
+		ULOG_ERRNO("open('%s')", -res, self->input_file);
+		goto error;
+	}
+
+	/* Get size and map it */
+	self->in_size = lseek(self->in_fd, 0, SEEK_END);
+	if (self->in_size == (size_t)-1) {
+		res = -errno;
+		ULOG_ERRNO("lseek", -res);
+		goto error;
+	}
+
+	self->in_data = mmap(
+		NULL, self->in_size, PROT_READ, MAP_PRIVATE, self->in_fd, 0);
+	if (self->in_data == MAP_FAILED) {
+		res = -errno;
+		ULOG_ERRNO("mmap", -res);
+		goto error;
+	}
+#endif
+
+	return 0;
+
+error:
+	unmap_file(self);
+	return res;
 }
 
 
@@ -787,7 +901,6 @@ int main(int argc, char **argv)
 	int res = 0, status = EXIT_SUCCESS;
 	int idx, c, mutex_init = 0, cond_init = 0;
 	uint32_t supported_input_format;
-	char *input_file = NULL, *output_file = NULL;
 	struct vdec_prog *self = NULL;
 	struct timespec cur_ts = {0, 0};
 	uint64_t start_time = 0, end_time = 0;
@@ -806,6 +919,12 @@ int main(int argc, char **argv)
 		status = EXIT_FAILURE;
 		goto out;
 	}
+#ifdef _WIN32
+	self->in_file = INVALID_HANDLE_VALUE;
+	self->in_file_map = INVALID_HANDLE_VALUE;
+#else
+	self->in_fd = -1;
+#endif
 	self->first_in_frame = 1;
 	self->first_out_frame = 1;
 	self->ts_inc = DEFAULT_TS_INC;
@@ -840,13 +959,14 @@ int main(int argc, char **argv)
 			goto out;
 
 		case 'i':
-			input_file = optarg;
+			self->input_file = optarg;
 			break;
 
 		case 'o':
-			output_file = optarg;
-			if ((strlen(output_file) > 4) &&
-			    (!strncasecmp(output_file + strlen(output_file) - 4,
+			self->output_file = optarg;
+			if ((strlen(self->output_file) > 4) &&
+			    (!strncasecmp(self->output_file +
+						  strlen(self->output_file) - 4,
 					  ".y4m",
 					  4)))
 				self->output_file_y4m = 1;
@@ -876,37 +996,23 @@ int main(int argc, char **argv)
 	}
 
 	/* Check the parameters */
-	if (input_file == NULL) {
+	if (self->input_file == NULL) {
 		ULOGE("invalid input file");
 		usage(argv[0]);
 		status = EXIT_FAILURE;
 		goto out;
 	}
 
-	/* Input file */
-	self->in_fd = open(input_file, O_RDONLY);
-	if (self->in_fd < 0) {
-		ULOG_ERRNO("open", errno);
-		status = EXIT_FAILURE;
-		goto out;
-	}
-	self->in_size = lseek(self->in_fd, 0, SEEK_END);
-	if (self->in_size == (size_t)-1) {
-		ULOG_ERRNO("lseek", errno);
-		status = EXIT_FAILURE;
-		goto out;
-	}
-	self->in_data = mmap(
-		NULL, self->in_size, PROT_READ, MAP_PRIVATE, self->in_fd, 0);
-	if (self->in_data == MAP_FAILED) {
-		ULOG_ERRNO("mmap", errno);
+	/* Map the input file */
+	res = map_file(self);
+	if (res < 0) {
 		status = EXIT_FAILURE;
 		goto out;
 	}
 
 	/* Output file */
-	if (output_file) {
-		self->out_file = fopen(output_file, "wb");
+	if (self->output_file) {
+		self->out_file = fopen(self->output_file, "wb");
 		if (self->out_file == NULL) {
 			ULOG_ERRNO("fopen", errno);
 			status = EXIT_FAILURE;
@@ -991,10 +1097,7 @@ int main(int argc, char **argv)
 out:
 	/* Cleanup and exit */
 	if (self != NULL) {
-		if (self->in_fd >= 0) {
-			munmap(self->in_data, self->in_size);
-			close(self->in_fd);
-		}
+		unmap_file(self);
 		if (self->out_file != NULL)
 			fclose(self->out_file);
 		if (self->in_buf != NULL) {

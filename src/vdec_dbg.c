@@ -35,12 +35,13 @@ static FILE *vdec_dbg_create_file(const char *dir,
 {
 	int res;
 	FILE *file = NULL;
-	char *path = NULL;
-	time_t t;
+	uint64_t epoch_sec = 0;
+	int32_t utc_offset_sec = 0;
 	struct tm tm;
+	char *path = NULL;
 
-	t = time(NULL);
-	localtime_r(&t, &tm);
+	time_local_get(&epoch_sec, &utc_offset_sec);
+	time_local_to_tm(epoch_sec, utc_offset_sec, &tm);
 
 	res = asprintf(&path,
 		       "%s/vdec_%04d%02d%02d_%02d%02d%02d_%d_%p_%s",

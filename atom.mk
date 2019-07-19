@@ -33,6 +33,8 @@ ifeq ("$(TARGET_OS)","darwin")
 	-framework CoreMedia \
 	-framework CoreVideo \
 	-framework VideoToolbox
+else ifeq ("$(TARGET_OS)","windows")
+  LOCAL_LDLIBS += -lws2_32
 endif
 
 include $(BUILD_LIBRARY)
@@ -56,6 +58,8 @@ LOCAL_CONDITIONAL_LIBRARIES := \
 
 ifeq ("$(TARGET_OS)-$(TARGET_OS_FLAVOUR)-$(TARGET_PRODUCT_VARIANT)","linux-generic-raspi")
   LOCAL_LDLIBS += -lbcm_host -lvchiq_arm
+else ifeq ("$(TARGET_OS)","windows")
+  LOCAL_LDLIBS += -lws2_32
 endif
 
 include $(BUILD_EXECUTABLE)

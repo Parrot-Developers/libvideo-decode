@@ -28,13 +28,18 @@
 #define _VDEC_PRIV_H_
 
 #define _GNU_SOURCE
-#include <arpa/inet.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <ulog.h>
+
+#ifdef _WIN32
+#	include <winsock2.h>
+#else /* !_WIN32 */
+#	include <arpa/inet.h>
+#endif /* !_WIN32 */
 
 #include <futils/futils.h>
 #include <h264/h264.h>
