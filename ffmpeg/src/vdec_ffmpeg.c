@@ -78,17 +78,13 @@ static void av_log_cb(void *avcl, int level, const char *fmt, va_list vl)
 
 static void flush_complete(struct vdec_ffmpeg *self)
 {
-	/* Call the flush callback if defined */
-	if (self->base->cbs.flush)
-		self->base->cbs.flush(self->base, self->base->userdata);
+	vdec_call_flush_cb(self->base);
 }
 
 
 static void stop_complete(struct vdec_ffmpeg *self)
 {
-	/* Call the stop callback if defined */
-	if (self->base->cbs.stop)
-		self->base->cbs.stop(self->base, self->base->userdata);
+	vdec_call_stop_cb(self->base);
 }
 
 
@@ -113,7 +109,7 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 			break;
 		case VDEC_MSG_STOP:
 			stop_complete(self);
-			break;
+			return;
 		default:
 			ULOGE("unknown message: %c", message);
 			break;
@@ -138,8 +134,7 @@ static void out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 				   -ret);
 			return;
 		}
-		self->base->cbs.frame_output(
-			self->base, 0, out_frame, self->base->userdata);
+		vdec_call_frame_output_cb(self->base, 0, out_frame);
 		mbuf_raw_video_frame_unref(out_frame);
 	} while (ret == 0);
 }
@@ -389,7 +384,7 @@ vdec_ffmpeg_set_frame_metadata(struct vdec_ffmpeg *self,
 	default:
 		ret = -ENOSYS;
 		ULOG_ERRNO("unsupported output chroma format", -ret);
-		return ret;
+		goto out;
 	}
 
 	time_get_monotonic(&cur_ts);
@@ -403,16 +398,16 @@ vdec_ffmpeg_set_frame_metadata(struct vdec_ffmpeg *self,
 	if (ret < 0)
 		ULOG_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer", -ret);
 
+	ret = mbuf_raw_video_frame_finalize(*out_frame);
+	if (ret < 0)
+		ULOG_ERRNO("mbuf_raw_video_frame_finalize", -ret);
+
 	if (self->base->dbg.output_yuv != NULL) {
 		int dbgret = vdec_dbg_write_yuv_frame(
 			self->base->dbg.output_yuv, *out_frame);
 		if (dbgret < 0)
 			ULOG_ERRNO("vdec_dbg_write_yuv_frame", -dbgret);
 	}
-
-	ret = mbuf_raw_video_frame_finalize(*out_frame);
-	if (ret < 0)
-		ULOG_ERRNO("mbuf_raw_video_frame_finalize", -ret);
 
 out:
 	err = mbuf_mem_unref(out_mem);

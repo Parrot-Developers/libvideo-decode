@@ -112,6 +112,12 @@ enum vdec_decoder_implem {
 
 	/* Amlogic decoder implementation */
 	VDEC_DECODER_IMPLEM_AML,
+
+	/* TurboJPEG decoder implementation */
+	VDEC_DECODER_IMPLEM_TURBOJPEG,
+
+	/* End of supported implementation */
+	VDEC_DECODER_IMPLEM_MAX,
 };
 
 

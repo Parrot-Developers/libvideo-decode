@@ -24,59 +24,33 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define ULOG_TAG vdec_core
-#include "vdec_core_priv.h"
+#ifndef _VDEC_TURBOJPEG_H_
+#define _VDEC_TURBOJPEG_H_
 
+#include <stdint.h>
 
-const char *vdec_decoder_implem_str(enum vdec_decoder_implem implem)
-{
-	switch (implem) {
-	case VDEC_DECODER_IMPLEM_FFMPEG:
-		return "FFMPEG";
-	case VDEC_DECODER_IMPLEM_MEDIACODEC:
-		return "MEDIACODEC";
-	case VDEC_DECODER_IMPLEM_VIDEOTOOLBOX:
-		return "VIDEOTOOLBOX";
-	case VDEC_DECODER_IMPLEM_VIDEOCOREMMAL:
-		return "VIDEOCOREMMAL";
-	case VDEC_DECODER_IMPLEM_HISI:
-		return "HISI";
-	case VDEC_DECODER_IMPLEM_AML:
-		return "AML";
-	case VDEC_DECODER_IMPLEM_TURBOJPEG:
-		return "TURBOJPEG";
-	default:
-		return "UNKNOWN";
-	}
+#include <video-decode/vdec_core.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif /* __cplusplus */
+
+/* To be used for all public API */
+#ifdef VDEC_API_EXPORTS
+#	ifdef _WIN32
+#		define VDEC_API __declspec(dllexport)
+#	else /* !_WIN32 */
+#		define VDEC_API __attribute__((visibility("default")))
+#	endif /* !_WIN32 */
+#else /* !VDEC_API_EXPORTS */
+#	define VDEC_API
+#endif /* !VDEC_API_EXPORTS */
+
+extern VDEC_API const struct vdec_ops vdec_turbojpeg_ops;
+
+#ifdef __cplusplus
 }
+#endif /* __cplusplus */
 
 
-struct vdec_config_impl *
-vdec_config_get_specific(struct vdec_config *config,
-			 enum vdec_decoder_implem implem)
-{
-	/* Check if specific config is present */
-	if (!config->implem_cfg)
-		return NULL;
-
-	/* Check if implementation is the right one */
-	if (config->implem != implem) {
-		ULOGI("specific config found, but implementation is %s "
-		      "instead of %s. ignoring specific config",
-		      vdec_decoder_implem_str(config->implem),
-		      vdec_decoder_implem_str(implem));
-		return NULL;
-	}
-
-	/* Check if specific config implementation matches the base one */
-	if (config->implem_cfg->implem != config->implem) {
-		ULOGW("specific config implem (%s) does not match"
-		      " base config implem (%s). ignoring specific config",
-		      vdec_decoder_implem_str(config->implem_cfg->implem),
-		      vdec_decoder_implem_str(config->implem));
-		return NULL;
-	}
-
-	/* All tests passed, return specific config */
-	return config->implem_cfg;
-}
+#endif /* !_VDEC_TURBOJPEG_H_ */

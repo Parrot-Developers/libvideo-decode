@@ -57,6 +57,10 @@ static const struct vdec_ops *implem_ops(enum vdec_decoder_implem implem)
 	case VDEC_DECODER_IMPLEM_AML:
 		return &vdec_aml_ops;
 #endif
+#ifdef BUILD_LIBVIDEO_DECODE_TURBOJPEG
+	case VDEC_DECODER_IMPLEM_TURBOJPEG:
+		return &vdec_turbojpeg_ops;
+#endif
 	default:
 		return NULL;
 	}
@@ -115,45 +119,62 @@ static int vdec_get_implem(enum vdec_decoder_implem *implem)
 	}
 #endif /* BUILD_LIBVIDEO_DECODE_FFMPEG */
 
+#ifdef BUILD_LIBVIDEO_DECODE_TURBOJPEG
+	if ((*implem == VDEC_DECODER_IMPLEM_AUTO) ||
+	    (*implem == VDEC_DECODER_IMPLEM_TURBOJPEG)) {
+		*implem = VDEC_DECODER_IMPLEM_TURBOJPEG;
+		return 0;
+	}
+#endif /* BUILD_LIBVIDEO_DECODE_TURBOJPEG */
+
 	return -ENOSYS;
 }
 
 
-static void log_info(struct video_info *info)
+static void log_video_info(struct video_info *info, int level)
 {
-	/* Log video info */
-	ULOGI("dimensions: width=%u height=%u SAR=%u:%u",
-	      info->resolution.width,
-	      info->resolution.height,
-	      info->sar.width,
-	      info->sar.height);
-	ULOGI("crop: left=%u top=%u width=%u height=%u",
-	      info->crop.left,
-	      info->crop.top,
-	      info->crop.width,
-	      info->crop.height);
+	/* Log photo/video info */
+	ULOG_PRI(level,
+		 "dimensions: width=%u height=%u SAR=%u:%u",
+		 info->resolution.width,
+		 info->resolution.height,
+		 info->sar.width,
+		 info->sar.height);
+	ULOG_PRI(level,
+		 "crop: left=%u top=%u width=%u height=%u",
+		 info->crop.left,
+		 info->crop.top,
+		 info->crop.width,
+		 info->crop.height);
 	if ((info->framerate.num != 0) && (info->framerate.den != 0)) {
-		ULOGI("declared framerate: %u/%u -> %.3f fps",
-		      info->framerate.num,
-		      info->framerate.den,
-		      (float)info->framerate.num / (float)info->framerate.den);
+		ULOG_PRI(level,
+			 "declared framerate: %u/%u -> %.3f fps",
+			 info->framerate.num,
+			 info->framerate.den,
+			 (float)info->framerate.num /
+				 (float)info->framerate.den);
 	}
-	ULOGI("%d bits, color primaries: %s, transfer function: %s, "
-	      "matrix coefficients: %s, full range: %d",
-	      info->bit_depth,
-	      vdef_color_primaries_to_str(info->color_primaries),
-	      vdef_transfer_function_to_str(info->transfer_function),
-	      vdef_matrix_coefs_to_str(info->matrix_coefs),
-	      info->full_range);
+	ULOG_PRI(level,
+		 "%d bits, color primaries: %s, transfer function: %s, "
+		 "matrix coefficients: %s, full range: %d",
+		 info->bit_depth,
+		 vdef_color_primaries_to_str(info->color_primaries),
+		 vdef_transfer_function_to_str(info->transfer_function),
+		 vdef_matrix_coefs_to_str(info->matrix_coefs),
+		 info->full_range);
 	if ((info->nal_hrd_bitrate != 0) && (info->nal_hrd_cpb_size != 0)) {
-		ULOGI("declared NAL bitrate: %u bit/s (CPB size %u bits)",
-		      info->nal_hrd_bitrate,
-		      info->nal_hrd_cpb_size);
+		ULOG_PRI(level,
+			 "declared NAL bitrate: "
+			 "%u bit/s (CPB size %u bits)",
+			 info->nal_hrd_bitrate,
+			 info->nal_hrd_cpb_size);
 	}
 	if ((info->vcl_hrd_bitrate != 0) && (info->vcl_hrd_cpb_size != 0)) {
-		ULOGI("declared VCL bitrate: %u bit/s (CPB size %u bits)",
-		      info->vcl_hrd_bitrate,
-		      info->vcl_hrd_cpb_size);
+		ULOG_PRI(level,
+			 "declared VCL bitrate: "
+			 "%u bit/s (CPB size %u bits)",
+			 info->vcl_hrd_bitrate,
+			 info->vcl_hrd_cpb_size);
 	}
 }
 
@@ -183,6 +204,39 @@ enum vdec_decoder_implem vdec_get_auto_implem(void)
 	ULOG_ERRNO_RETURN_VAL_IF(ret < 0, -ret, VDEC_DECODER_IMPLEM_AUTO);
 
 	return implem;
+}
+
+
+enum vdec_decoder_implem
+vdec_get_auto_implem_by_coded_format(struct vdef_coded_format *format)
+{
+	int res = 0, count;
+	const struct vdef_coded_format *supported_input_formats;
+
+	ULOG_ERRNO_RETURN_VAL_IF(
+		format == NULL, EINVAL, VDEC_DECODER_IMPLEM_AUTO);
+
+	for (enum vdec_decoder_implem implem = VDEC_DECODER_IMPLEM_AUTO + 1;
+	     implem < VDEC_DECODER_IMPLEM_MAX;
+	     implem++) {
+
+		res = vdec_get_implem(&implem);
+		if (res < 0)
+			continue;
+
+		count = implem_ops(implem)->get_supported_input_formats(
+			&supported_input_formats);
+		if (count < 0)
+			continue;
+
+		if (!vdef_coded_format_intersect(
+			    format, supported_input_formats, count))
+			continue;
+
+		return implem;
+	}
+
+	return VDEC_DECODER_IMPLEM_AUTO;
 }
 
 
@@ -288,7 +342,7 @@ int vdec_new(struct pomp_loop *loop,
 	self->userdata = userdata;
 	self->config = *config;
 	self->config.name = xstrdup(config->name);
-	self->last_timestamp = UINT64_MAX;
+	atomic_init(&self->last_timestamp, UINT64_MAX);
 
 	/* Override debug config with environment if set */
 	if (env_dbg_dir != NULL)
@@ -401,6 +455,76 @@ int vdec_destroy(struct vdec_decoder *self)
 }
 
 
+int vdec_set_jpeg_params(struct vdec_decoder *self,
+			 const struct vdef_format_info *format_info)
+{
+	int ret = 0, count;
+	const struct vdef_coded_format *supported_input_formats;
+
+	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(format_info == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF((format_info->resolution.width == 0) ||
+					 (format_info->resolution.height == 0),
+				 EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF((format_info->framerate.num == 0) ||
+					 (format_info->framerate.den == 0),
+				 EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(self->config.encoding != VDEF_ENCODING_MJPEG,
+				 EINVAL);
+
+	count = self->ops->get_supported_input_formats(
+		&supported_input_formats);
+	if (count < 0) {
+		ULOG_ERRNO("get_supported_input_formats", -count);
+		return -EINVAL;
+	}
+
+	if (!vdef_coded_format_intersect(
+		    &vdef_jpeg_jfif, supported_input_formats, count)) {
+		ULOG_ERRNO("unsupported input formats", EINVAL);
+		return -EINVAL;
+	}
+
+	self->video_info = (const struct video_info){
+		.resolution = {format_info->resolution.width,
+			       format_info->resolution.height},
+		.bit_depth = format_info->bit_depth,
+		.sar = format_info->sar,
+		.crop = {0,
+			 0,
+			 format_info->resolution.width,
+			 format_info->resolution.height},
+		.full_range = format_info->full_range,
+		.color_primaries = format_info->color_primaries,
+		.transfer_function = format_info->transfer_function,
+		.matrix_coefs = format_info->matrix_coefs,
+		.framerate.num = format_info->framerate.num,
+		.framerate.den = format_info->framerate.den,
+	};
+
+	if ((self->video_info.bit_depth != 8) ||
+	    (self->video_info.color_primaries != VDEF_COLOR_PRIMARIES_SRGB) ||
+	    (self->video_info.transfer_function !=
+	     VDEF_TRANSFER_FUNCTION_BT709) ||
+	    (self->video_info.matrix_coefs != VDEF_MATRIX_COEFS_SRGB)) {
+		ULOG_ERRNO("invalid input format", EINVAL);
+		log_video_info(&self->video_info, ULOG_ERR);
+		return -EINVAL;
+	}
+
+	log_video_info(&self->video_info, ULOG_INFO);
+
+	if (!self->ops->set_jpeg_params) {
+		self->configured = 1;
+		return 0;
+	}
+
+	ret = self->ops->set_jpeg_params(self);
+	self->configured = (ret == 0) ? 1 : 0;
+	return ret;
+}
+
+
 int vdec_set_h264_ps(struct vdec_decoder *self,
 		     const uint8_t *sps,
 		     size_t sps_size,
@@ -483,7 +607,7 @@ int vdec_set_h264_ps(struct vdec_decoder *self,
 		.vcl_hrd_cpb_size = info.vcl_hrd_cpb_size,
 	};
 
-	log_info(&self->video_info);
+	log_video_info(&self->video_info, ULOG_INFO);
 
 	count = self->ops->get_supported_input_formats(
 		&supported_input_formats);
@@ -662,7 +786,7 @@ int vdec_set_h265_ps(struct vdec_decoder *self,
 		.vcl_hrd_cpb_size = info.vcl_hrd_cpb_size,
 	};
 
-	log_info(&self->video_info);
+	log_video_info(&self->video_info, ULOG_INFO);
 
 	if (self->ops->set_h265_ps) {
 		count = self->ops->get_supported_input_formats(

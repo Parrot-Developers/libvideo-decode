@@ -49,6 +49,7 @@
 #include <media-buffers/mbuf_coded_video_frame.h>
 #include <media-buffers/mbuf_mem_generic.h>
 #include <media-buffers/mbuf_raw_video_frame.h>
+#include <photo_metadata.h>
 #include <video-decode/vdec.h>
 #include <video-raw/vraw.h>
 #define ULOG_TAG vdec_prog
@@ -73,6 +74,7 @@ static inline const char *strsignal(int signum)
 
 #define DEFAULT_IN_BUF_COUNT 10
 #define DEFAULT_IN_BUF_CAPACITY (3840 * 2160 * 3 / 4)
+#define DEFAULT_MJPEG_IN_BUF_CAPACITY (8000 * 6000 * 3 / 4)
 #define DEFAULT_TS_INC 33333
 
 
@@ -146,6 +148,7 @@ struct vdec_prog {
 		FILE *csv_file;
 		double psnr_sum[3];
 	} psnr;
+	struct pmeta_data metadata;
 };
 
 
@@ -262,6 +265,7 @@ error:
 static int configure(struct vdec_prog *self)
 {
 	int res, buf_count;
+	size_t mem_size;
 
 	switch (self->config.encoding) {
 	case VDEF_ENCODING_H264: {
@@ -319,6 +323,36 @@ static int configure(struct vdec_prog *self)
 		self->framerate.den = info.framerate_den * self->decimation;
 		break;
 	}
+	case VDEF_ENCODING_MJPEG: {
+		/* As it is not possible yet to handle a stream of JPEG
+		 * photo, let's consider that only one photo can be handled
+		 * and force framerate to 1 fps */
+		self->framerate.num = 1;
+		self->framerate.den = 1;
+
+		/* clang-format off */
+		struct vdef_format_info format_info = {
+			.bit_depth = 8,
+			.sar = {1, 1},
+			.full_range = 1,
+			.framerate = self->framerate,
+			.color_primaries = VDEF_COLOR_PRIMARIES_SRGB,
+			.transfer_function = VDEF_TRANSFER_FUNCTION_BT709,
+			.matrix_coefs = VDEF_MATRIX_COEFS_SRGB,
+			.resolution = {
+				.width = self->metadata.width,
+				.height = self->metadata.height,
+			},
+		};
+		/* clang-format on */
+
+		res = vdec_set_jpeg_params(self->decoder, &format_info);
+		if (res < 0) {
+			ULOG_ERRNO("vdec_set_jpeg_params", -res);
+			return res;
+		}
+		break;
+	}
 	default:
 		break;
 	}
@@ -326,12 +360,15 @@ static int configure(struct vdec_prog *self)
 	/* Input buffer pool */
 	self->in_pool = vdec_get_input_buffer_pool(self->decoder);
 	if (self->in_pool == NULL) {
+		mem_size = self->config.encoding == VDEF_ENCODING_MJPEG
+				   ? DEFAULT_MJPEG_IN_BUF_CAPACITY
+				   : DEFAULT_IN_BUF_CAPACITY;
 		buf_count = (self->config.preferred_thread_count + 1 >
 			     DEFAULT_IN_BUF_COUNT)
 				    ? self->config.preferred_thread_count + 1
 				    : DEFAULT_IN_BUF_COUNT;
 		res = mbuf_pool_new(mbuf_mem_generic_impl,
-				    DEFAULT_IN_BUF_CAPACITY,
+				    mem_size,
 				    0,
 				    MBUF_POOL_SMART_GROW,
 				    buf_count,
@@ -414,10 +451,7 @@ static int append_to_frame(struct vdec_prog *self,
 {
 	int res;
 	size_t au_offset, capacity;
-	size_t nalu_offset = (self->in_info.format.data_format ==
-			      VDEF_CODED_DATA_FORMAT_RAW_NALU)
-				     ? 0
-				     : 4;
+	size_t nalu_offset;
 	uint8_t *au_data, *nalu_data;
 	uint32_t start;
 
@@ -425,6 +459,18 @@ static int append_to_frame(struct vdec_prog *self,
 	ULOG_ERRNO_RETURN_ERR_IF(mem == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(data == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(len == 0, EINVAL);
+
+	switch (self->in_info.format.data_format) {
+	case VDEF_CODED_DATA_FORMAT_AVCC:
+	case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
+		nalu_offset = 4;
+		break;
+	case VDEF_CODED_DATA_FORMAT_RAW_NALU:
+	case VDEF_CODED_DATA_FORMAT_JFIF:
+	default:
+		nalu_offset = 0;
+		break;
+	}
 
 	au_offset = self->in_mem_offset;
 	res = mbuf_mem_get_data(mem, (void **)&au_data, &capacity);
@@ -466,6 +512,9 @@ static int append_to_frame(struct vdec_prog *self,
 		break;
 	case VDEF_ENCODING_H265:
 		nalu.h265.type = type.h265;
+		break;
+	case VDEF_ENCODING_MJPEG:
+		/* nothing to do */
 		break;
 	default:
 		ULOGE("unsupported encoding %s",
@@ -1126,6 +1175,100 @@ static void finish_idle(void *userdata)
 }
 
 
+static void jpeg_parse_idle(void *userdata)
+{
+	int res;
+	ssize_t len;
+	struct vdec_prog *self = userdata;
+
+	/* TODO need a JPEG reader,
+	 * to handle the case of a stream that
+	 * contains several JPEG file
+	 * by now only one frame can be handled */
+
+	res = configure(self);
+	if (res < 0) {
+		ULOG_ERRNO("configure", -res);
+		goto cleanup;
+	}
+
+	if ((self->in_pool != NULL) && (self->in_mem == NULL)) {
+		res = mbuf_pool_get(self->in_pool, &self->in_mem);
+		if ((res < 0) && (res != -EAGAIN))
+			ULOG_ERRNO("mbuf_pool_get:input", -res);
+
+		if (self->in_mem == NULL)
+			goto cleanup;
+	}
+
+	/* Create the frame */
+	if (self->in_frame == NULL) {
+		res = mbuf_coded_video_frame_new(&self->in_info,
+						 &self->in_frame);
+		if (res < 0) {
+			ULOG_ERRNO("mbuf_coded_video_frame_new:input", -res);
+			mbuf_mem_unref(self->in_mem);
+			self->in_mem = NULL;
+			goto cleanup;
+		}
+	}
+
+	/* Take note that self->pending_nalu_type that is useless here for
+	 * JPEG/MJPEG decoding */
+	res = append_to_frame(self,
+			      self->in_frame,
+			      self->in_mem,
+			      self->in_data,
+			      self->in_len,
+			      self->pending_nalu_type);
+	if (res < 0) {
+		ULOG_ERRNO("append_to_frame", -res);
+		goto cleanup;
+	}
+
+	res = mbuf_coded_video_frame_finalize(self->in_frame);
+	if (res < 0) {
+		ULOG_ERRNO("mbuf_coded_video_frame_finalize:input", -res);
+		goto cleanup;
+	}
+
+	res = mbuf_coded_video_frame_queue_push(self->in_queue, self->in_frame);
+	if (res < 0) {
+		ULOG_ERRNO("mbuf_coded_video_frame_queue_push:input", -res);
+		goto cleanup;
+	}
+	len = mbuf_coded_video_frame_get_packed_size(self->in_frame);
+	if (len < 0)
+		ULOG_ERRNO("mbuf_coded_video_frame_get_packed_size", (int)-len);
+	else
+		self->total_bytes += len;
+	self->input_count++;
+	self->output_finished = 0;
+
+cleanup:
+	if (self->in_frame) {
+		res = mbuf_coded_video_frame_unref(self->in_frame);
+		if (res < 0)
+			ULOG_ERRNO("mbuf_coded_video_frame_unref:input", -res);
+		self->in_frame = NULL;
+	}
+
+	if (self->in_mem) {
+		res = mbuf_mem_unref(self->in_mem);
+		if (res < 0)
+			ULOG_ERRNO("mbuf_mem_unref:input", -res);
+		self->in_mem = NULL;
+	}
+	self->in_info.info.index++;
+	self->in_info.info.timestamp += self->ts_inc;
+
+	/* TODO: find a better way to end decoding for MJPEG stream */
+	self->input_finished = 1;
+	res = pomp_loop_idle_add(self->loop, &finish_idle, self);
+	if (res < 0)
+		ULOG_ERRNO("pomp_loop_idle_add", -res);
+}
+
 static void au_parse_idle(void *userdata)
 {
 	int res;
@@ -1299,8 +1442,6 @@ int main(int argc, char **argv)
 {
 	int res = 0, status = EXIT_SUCCESS;
 	int idx, c;
-	const struct vdef_coded_format *supported_input_formats;
-	int nb_supported_input_formats;
 	struct vdec_prog *self = NULL;
 	struct timespec cur_ts = {0, 0};
 	uint64_t start_time = 0, end_time = 0;
@@ -1358,8 +1499,11 @@ int main(int argc, char **argv)
 			    is_suffix(".265", self->input_file) ||
 			    is_suffix(".hvc", self->input_file)) {
 				self->config.encoding = VDEF_ENCODING_H265;
-			} else {
+			} else if (is_suffix(".h264", self->input_file) ||
+				   is_suffix(".264", self->input_file)) {
 				self->config.encoding = VDEF_ENCODING_H264;
+			} else {
+				self->config.encoding = VDEF_ENCODING_MJPEG;
 			}
 			break;
 
@@ -1468,35 +1612,57 @@ int main(int argc, char **argv)
 			goto out;
 		}
 		break;
+	case VDEF_ENCODING_MJPEG:
+		/* TODO: make a version that work with JPEG image that does
+		 * not contains metadata (APP1) */
+		res = pmeta_data_parse(self->input_file, &self->metadata);
+		if (res < 0 && res == -ENOSYS) {
+			ULOG_ERRNO(
+				"unable to parse JPEG/JIFF without EXIF and "
+				"XMP metadata",
+				-res);
+			status = EXIT_FAILURE;
+			goto out;
+		}
+
+		if (res < 0) {
+			ULOG_ERRNO("cannot parse metadata", -res);
+			status = EXIT_FAILURE;
+			goto out;
+		}
+		break;
 	default:
 		break;
 	}
 
-	nb_supported_input_formats = vdec_get_supported_input_formats(
-		VDEC_DECODER_IMPLEM_AUTO, &supported_input_formats);
-	if (nb_supported_input_formats < 0) {
-		ULOG_ERRNO("vdec_get_supported_input_formats",
-			   -nb_supported_input_formats);
-		status = EXIT_FAILURE;
-		goto out;
-	}
-
-	byte_stream.encoding = avcc.encoding = self->config.encoding;
-	if (vdef_coded_format_intersect(&byte_stream,
-					supported_input_formats,
-					nb_supported_input_formats)) {
+	if (self->config.encoding != VDEF_ENCODING_MJPEG) {
+		byte_stream.encoding = avcc.encoding = self->config.encoding;
+		self->config.implem =
+			vdec_get_auto_implem_by_coded_format(&byte_stream);
 		self->in_info.format = byte_stream;
-	} else if (vdef_coded_format_intersect(&avcc,
-					       supported_input_formats,
-					       nb_supported_input_formats)) {
-		self->in_info.format = avcc;
-	} else {
-		ULOGE("unsupported video encoding");
-		status = EXIT_FAILURE;
-		goto out;
-	}
+		if (self->config.implem == VDEC_DECODER_IMPLEM_AUTO) {
+			self->config.implem =
+				vdec_get_auto_implem_by_coded_format(&avcc);
+			self->in_info.format = avcc;
+		}
 
-	self->config.gen_grey_idr = 1;
+		if (self->config.implem == VDEC_DECODER_IMPLEM_AUTO) {
+			ULOGE("unsupported video encoding");
+			status = EXIT_FAILURE;
+			goto out;
+		}
+
+		self->config.gen_grey_idr = 1;
+	} else {
+		self->in_info.format = vdef_jpeg_jfif;
+		self->config.implem = vdec_get_auto_implem_by_coded_format(
+			&self->in_info.format);
+		if (self->config.implem == VDEC_DECODER_IMPLEM_AUTO) {
+			ULOGE("unsupported photo encoding");
+			status = EXIT_FAILURE;
+			goto out;
+		}
+	}
 
 	/* Create the decoder */
 	res = vdec_new(
@@ -1508,7 +1674,11 @@ int main(int argc, char **argv)
 	}
 
 	/* Start */
-	res = pomp_loop_idle_add(self->loop, au_parse_idle, self);
+	res = pomp_loop_idle_add(self->loop,
+				 (self->config.encoding == VDEF_ENCODING_MJPEG)
+					 ? jpeg_parse_idle
+					 : au_parse_idle,
+				 self);
 	if (res < 0) {
 		ULOG_ERRNO("pomp_loop_idle_add", -res);
 		status = EXIT_FAILURE;

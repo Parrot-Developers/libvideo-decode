@@ -44,25 +44,20 @@ static void initialize_supported_formats(void)
 
 static void flush_complete(struct vdec_videotoolbox *self)
 {
-	/* Call the flush callback if defined */
-	if (self->base->cbs.flush)
-		self->base->cbs.flush(self->base, self->base->userdata);
+	vdec_call_flush_cb(self->base);
 	self->need_sync = 1;
 }
 
 
 static void stop_complete(struct vdec_videotoolbox *self)
 {
-	/* Call the stop callback if defined */
-	if (self->base->cbs.stop)
-		self->base->cbs.stop(self->base, self->base->userdata);
+	vdec_call_stop_cb(self->base);
 }
 
 
 static void decoder_error(struct vdec_videotoolbox *self, int error)
 {
-	self->base->cbs.frame_output(
-		self->base, error, NULL, self->base->userdata);
+	vdec_call_frame_output_cb(self->base, error, NULL);
 }
 
 
@@ -113,8 +108,7 @@ static void out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 			ULOG_ERRNO("mbuf_raw_video_frame_queue_pop", -ret);
 			return;
 		}
-		self->base->cbs.frame_output(
-			self->base, 0, frame, self->base->userdata);
+		vdec_call_frame_output_cb(self->base, 0, frame);
 		mbuf_raw_video_frame_unref(frame);
 	} while (ret == 0);
 }
@@ -688,13 +682,6 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 	if (ret < 0)
 		ULOG_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer", -ret);
 
-	if (self->base->dbg.output_yuv != NULL) {
-		int dbgret = vdec_dbg_write_yuv_frame(
-			self->base->dbg.output_yuv, *out_frame);
-		if (dbgret < 0)
-			ULOG_ERRNO("vdec_dbg_write_yuv_frame", -dbgret);
-	}
-
 out:
 	if (ret < 0 && *out_frame) {
 		mbuf_raw_video_frame_unref(*out_frame);
@@ -1074,6 +1061,13 @@ static void vdec_videotoolbox_frame_output_cb(void *decompress_output_ref_con,
 		goto out;
 	}
 
+	if (self->base->dbg.output_yuv != NULL) {
+		int dbgret = vdec_dbg_write_yuv_frame(
+			self->base->dbg.output_yuv, out_frame);
+		if (dbgret < 0)
+			ULOG_ERRNO("vdec_dbg_write_yuv_frame", -dbgret);
+	}
+
 	ret = mbuf_coded_video_frame_get_frame_info(in_frame, &in_info);
 	if (ret < 0) {
 		ULOG_ERRNO("mbuf_coded_video_frame_get_frame_info:decoder",
@@ -1151,6 +1145,36 @@ static void *vdec_videotoolbox_decoder_thread(void *ptr)
 	struct pomp_loop *loop = NULL;
 	struct pomp_evt *in_queue_evt = NULL;
 	int timeout;
+
+	switch (self->base->config.encoding) {
+	case VDEF_ENCODING_H264:
+		if (__builtin_available(iOS 11.0, macOS 10.13, tvos 11.0, *)) {
+			ULOGI("Apple VideoToolbox H.264 decoding - "
+			      "hardware acceleration %s supported",
+			      VTIsHardwareDecodeSupported(
+				      kCMVideoCodecType_H264)
+				      ? "is"
+				      : "is not");
+		} else {
+			ULOGI("Apple VideoToolbox H.264 decoding");
+		}
+		break;
+
+	case VDEF_ENCODING_H265:
+		if (__builtin_available(iOS 11.0, macOS 10.13, tvos 11.0, *)) {
+			ULOGI("Apple VideoToolbox H.265 decoding - "
+			      "hardware acceleration %s supported",
+			      VTIsHardwareDecodeSupported(
+				      kCMVideoCodecType_HEVC)
+				      ? "is"
+				      : "is not");
+		} else {
+			ULOGI("Apple VideoToolbox H.265 decoding");
+		}
+		break;
+	default:
+		break;
+	}
 
 	loop = pomp_loop_new();
 	if (!loop) {
@@ -1371,30 +1395,7 @@ static int create(struct vdec_decoder *base)
 
 	switch (base->config.encoding) {
 	case VDEF_ENCODING_H264:
-		if (__builtin_available(iOS 11.0, macOS 10.13, tvos 11.0, *)) {
-			ULOGI("Apple VideoToolbox H.264 decoding - "
-			      "hardware acceleration %s supported",
-			      VTIsHardwareDecodeSupported(
-				      kCMVideoCodecType_H264)
-				      ? "is"
-				      : "is not");
-		} else {
-			ULOGI("Apple VideoToolbox H.264 decoding");
-		}
 		self->need_sync = 1;
-		break;
-
-	case VDEF_ENCODING_H265:
-		if (__builtin_available(iOS 11.0, macOS 10.13, tvos 11.0, *)) {
-			ULOGI("Apple VideoToolbox H.265 decoding - "
-			      "hardware acceleration %s supported",
-			      VTIsHardwareDecodeSupported(
-				      kCMVideoCodecType_HEVC)
-				      ? "is"
-				      : "is not");
-		} else {
-			ULOGI("Apple VideoToolbox H.265 decoding");
-		}
 		break;
 	default:
 		break;

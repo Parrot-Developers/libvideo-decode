@@ -22,6 +22,7 @@ $(call load-config)
 LOCAL_CONDITIONAL_LIBRARIES := \
 	CONFIG_VDEC_FFMPEG:libvideo-decode-ffmpeg \
 	CONFIG_VDEC_MEDIACODEC:libvideo-decode-mediacodec \
+	CONFIG_VDEC_TURBOJPEG:libvideo-decode-turbojpeg \
 	CONFIG_VDEC_VIDEOCOREMMAL:libvideo-decode-videocoremmal \
 	CONFIG_VDEC_VIDEOTOOLBOX:libvideo-decode-videotoolbox \
 	CONFIG_VDEC_HISI:libvideo-decode-hisi \
@@ -124,6 +125,30 @@ endif
 
 include $(CLEAR_VARS)
 
+# turbojpeg implementation. can be enabled in the product configuration.
+LOCAL_MODULE := libvideo-decode-turbojpeg
+LOCAL_CATEGORY_PATH := libs
+LOCAL_DESCRIPTION := Video decoding library: turbojpeg implementation
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/turbojpeg/include
+LOCAL_CFLAGS := -DVDEC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_SRC_FILES := \
+	turbojpeg/src/vdec_turbojpeg.c
+LOCAL_LIBRARIES := \
+	libfutils \
+	libjpeg-turbo \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libpomp \
+	libulog \
+	libvideo-decode-core \
+	libvideo-defs \
+	libvideo-metadata
+
+include $(BUILD_LIBRARY)
+
+include $(CLEAR_VARS)
+
 # VideoCore MMAL (RaspberryPi) implementation.
 # can be enabled in the product configuration
 LOCAL_MODULE := libvideo-decode-videocoremmal
@@ -193,6 +218,7 @@ LOCAL_LIBRARIES := \
 	libmedia-buffers \
 	libmedia-buffers-memory \
 	libmedia-buffers-memory-generic \
+	libphoto-metadata \
 	libpomp \
 	libulog \
 	libvideo-decode \

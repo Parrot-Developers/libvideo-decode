@@ -28,6 +28,7 @@
 #include <ulog.h>
 ULOG_DECLARE_TAG(ULOG_TAG);
 
+#include <inttypes.h>
 #include <stdbool.h>
 
 #include <pthread.h>
@@ -39,6 +40,9 @@ ULOG_DECLARE_TAG(ULOG_TAG);
 #include <media-buffers/mbuf_mem_generic.h>
 #include <video-decode/vdec_internal.h>
 #include <video-decode/vdec_mediacodec.h>
+
+
+#define VDEC_ANCILLARY_KEY_MEDIACODEC_PTS "vdec.mediacodec.pts"
 
 enum state {
 	RUNNING,
@@ -374,6 +378,22 @@ static void push_frame(struct vdec_mediacodec *self,
 
 			mbuf_coded_video_frame_release_packed_buffer(idr_frame,
 								     idr_data);
+
+			mbuf_coded_video_frame_add_ancillary_buffer(
+				idr_frame,
+				VDEC_ANCILLARY_KEY_MEDIACODEC_PTS,
+				&timestamp,
+				sizeof(timestamp));
+
+			res = mbuf_coded_video_frame_queue_push(
+				self->meta_queue, idr_frame);
+			if (res < 0) {
+				ULOG_ERRNO("mbuf_coded_video_frame_queue_push",
+					   -res);
+				mbuf_coded_video_frame_unref(idr_frame);
+				goto end;
+			}
+
 			mbuf_coded_video_frame_unref(idr_frame);
 			if (status != AMEDIA_OK) {
 				ULOGE("AMediaCodec_queueInputBuffer");
@@ -458,6 +478,12 @@ static void push_frame(struct vdec_mediacodec *self,
 		ULOGE("AMediaCodec_queueInputBuffer");
 		goto end;
 	}
+
+	mbuf_coded_video_frame_add_ancillary_buffer(
+		frame,
+		VDEC_ANCILLARY_KEY_MEDIACODEC_PTS,
+		&ts_us,
+		sizeof(ts_us));
 
 	res = mbuf_coded_video_frame_queue_push(self->meta_queue, frame);
 	if (res < 0) {
@@ -623,6 +649,9 @@ static void pull_frame(struct vdec_mediacodec *self,
 	struct vmeta_frame *metadata = NULL;
 	struct timespec cur_ts;
 	uint64_t ts_us;
+	struct mbuf_ancillary_data *adata;
+	const uint64_t *input_pts;
+	size_t input_pts_len;
 
 	while (true) {
 		ssize_t status = AMediaCodec_dequeueOutputBuffer(
@@ -648,6 +677,33 @@ static void pull_frame(struct vdec_mediacodec *self,
 		}
 	}
 
+	res = mbuf_coded_video_frame_get_ancillary_data(
+		meta_frame, VDEC_ANCILLARY_KEY_MEDIACODEC_PTS, &adata);
+	if (res < 0 && res != -ENOENT) {
+		ULOG_ERRNO("mbuf_coded_video_frame_get_ancillary_data", -res);
+		goto skip_pts_check;
+	} else if (res == -ENOENT) {
+		ULOGD("Input frame has no associated PTS");
+		goto skip_pts_check;
+	}
+
+	input_pts = mbuf_ancillary_data_get_buffer(adata, &input_pts_len);
+	if (input_pts == NULL || input_pts_len != sizeof(*input_pts)) {
+		ULOG_ERRNO("mbuf_ancillary_data_get_buffer", -res);
+		mbuf_ancillary_data_unref(adata);
+		goto skip_pts_check;
+	}
+
+	if (*input_pts != (uint64_t)buffer_info.presentationTimeUs) {
+		ULOGD("Frame PTS mismatch for metadata (expected %" PRIu64
+		      ", got %" PRIi64 ")",
+		      *input_pts,
+		      buffer_info.presentationTimeUs);
+	}
+	mbuf_ancillary_data_unref(adata);
+
+
+skip_pts_check:
 	res = mbuf_coded_video_frame_get_frame_info(meta_frame, &meta_info);
 	if (res < 0) {
 		ULOG_ERRNO("mbuf_coded_video_frame_get_frame_info", -res);
@@ -868,8 +924,7 @@ static void on_output_event(struct pomp_evt *evt, void *userdata)
 						   -res);
 				break;
 			}
-			self->base->cbs.frame_output(
-				self->base, 0, frame, self->base->userdata);
+			vdec_call_frame_output_cb(self->base, 0, frame);
 			mbuf_raw_video_frame_unref(frame);
 		}
 
@@ -882,9 +937,7 @@ static void on_output_event(struct pomp_evt *evt, void *userdata)
 			AMediaCodec_flush(self->mc);
 			self->eos_pending = false;
 			self->need_sync = 1;
-			if (self->base->cbs.flush)
-				self->base->cbs.flush(self->base,
-						      self->base->userdata);
+			vdec_call_flush_cb(self->base);
 		}
 		break;
 	}
@@ -904,9 +957,7 @@ static void on_output_event(struct pomp_evt *evt, void *userdata)
 			mbuf_raw_video_frame_queue_flush(self->out_queue);
 			AMediaCodec_flush(self->mc);
 
-			if (self->base->cbs.flush != NULL)
-				self->base->cbs.flush(self->base,
-						      self->base->userdata);
+			vdec_call_flush_cb(self->base);
 		}
 		break;
 	case WAITING_FOR_STOP:
@@ -917,11 +968,8 @@ static void on_output_event(struct pomp_evt *evt, void *userdata)
 		pthread_mutex_unlock(&self->pull.mutex);
 		pthread_mutex_unlock(&self->push.mutex);
 
-		if (stop_complete) {
-			if (self->base->cbs.stop != NULL)
-				self->base->cbs.stop(self->base,
-						     self->base->userdata);
-		}
+		if (stop_complete)
+			vdec_call_stop_cb(self->base);
 		break;
 	default:
 		break;

@@ -24,59 +24,61 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define ULOG_TAG vdec_core
-#include "vdec_core_priv.h"
+#ifndef _VDEC_TURBOJPEG_PRIV_H_
+#define _VDEC_TURBOJPEG_PRIV_H_
 
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 
-const char *vdec_decoder_implem_str(enum vdec_decoder_implem implem)
+#include <futils/futils.h>
+#include <libpomp.h>
+
+#include <media-buffers/mbuf_coded_video_frame.h>
+#include <media-buffers/mbuf_mem.h>
+#include <media-buffers/mbuf_mem_generic.h>
+#include <media-buffers/mbuf_raw_video_frame.h>
+
+#include <video-decode/vdec_core.h>
+#include <video-decode/vdec_internal.h>
+#include <video-decode/vdec_turbojpeg.h>
+
+#include <turbojpeg.h>
+
+#define VDEC_MSG_FLUSH 'f'
+#define VDEC_MSG_STOP 's'
+#define SOFTMPEG_MAX_PLANES 3
+
+static inline void xfree(void **ptr)
 {
-	switch (implem) {
-	case VDEC_DECODER_IMPLEM_FFMPEG:
-		return "FFMPEG";
-	case VDEC_DECODER_IMPLEM_MEDIACODEC:
-		return "MEDIACODEC";
-	case VDEC_DECODER_IMPLEM_VIDEOTOOLBOX:
-		return "VIDEOTOOLBOX";
-	case VDEC_DECODER_IMPLEM_VIDEOCOREMMAL:
-		return "VIDEOCOREMMAL";
-	case VDEC_DECODER_IMPLEM_HISI:
-		return "HISI";
-	case VDEC_DECODER_IMPLEM_AML:
-		return "AML";
-	case VDEC_DECODER_IMPLEM_TURBOJPEG:
-		return "TURBOJPEG";
-	default:
-		return "UNKNOWN";
+	if (ptr) {
+		free(*ptr);
+		*ptr = NULL;
 	}
 }
 
+struct vdec_turbojpeg {
+	struct vdec_decoder *base;
 
-struct vdec_config_impl *
-vdec_config_get_specific(struct vdec_config *config,
-			 enum vdec_decoder_implem implem)
-{
-	/* Check if specific config is present */
-	if (!config->implem_cfg)
-		return NULL;
+	struct mbuf_coded_video_frame_queue *in_queue;
+	struct mbuf_raw_video_frame_queue *dec_out_queue;
+	struct pomp_evt *dec_out_queue_evt;
+	struct mbuf_pool *out_pool;
 
-	/* Check if implementation is the right one */
-	if (config->implem != implem) {
-		ULOGI("specific config found, but implementation is %s "
-		      "instead of %s. ignoring specific config",
-		      vdec_decoder_implem_str(config->implem),
-		      vdec_decoder_implem_str(implem));
-		return NULL;
-	}
+	tjhandle tj_handler;
 
-	/* Check if specific config implementation matches the base one */
-	if (config->implem_cfg->implem != config->implem) {
-		ULOGW("specific config implem (%s) does not match"
-		      " base config implem (%s). ignoring specific config",
-		      vdec_decoder_implem_str(config->implem_cfg->implem),
-		      vdec_decoder_implem_str(config->implem));
-		return NULL;
-	}
+	struct vdef_raw_format output_format;
 
-	/* All tests passed, return specific config */
-	return config->implem_cfg;
-}
+	pthread_t thread;
+	bool thread_launched;
+	atomic_bool should_stop;
+	atomic_bool flushing;
+	atomic_bool flush_discard;
+	struct mbox *mbox;
+
+	struct pomp_evt *dec_error_evt;
+	atomic_int status;
+};
+
+
+#endif /* !_VDEC_TURBOJPEG_PRIV_H_ */

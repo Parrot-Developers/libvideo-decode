@@ -167,6 +167,39 @@ bool vdec_is_sync_frame(struct mbuf_coded_video_frame *frame,
 }
 
 
+void vdec_call_frame_output_cb(struct vdec_decoder *base,
+			       int status,
+			       struct mbuf_raw_video_frame *frame)
+{
+	if (!base->cbs.frame_output)
+		return;
+
+	base->cbs.frame_output(base, status, frame, base->userdata);
+}
+
+
+void vdec_call_flush_cb(struct vdec_decoder *base)
+{
+	/* Reset last_timestamp */
+	atomic_store(&base->last_timestamp, UINT64_MAX);
+
+	/* Call the application callback */
+	if (!base->cbs.flush)
+		return;
+
+	base->cbs.flush(base, base->userdata);
+}
+
+
+void vdec_call_stop_cb(struct vdec_decoder *base)
+{
+	if (!base->cbs.stop)
+		return;
+
+	base->cbs.stop(base, base->userdata);
+}
+
+
 bool vdec_default_input_filter(struct mbuf_coded_video_frame *frame,
 			       void *userdata)
 {
@@ -202,6 +235,7 @@ bool vdec_default_input_filter_internal(
 	const struct vdef_coded_format *supported_formats,
 	unsigned int nb_supported_formats)
 {
+	uint64_t last_timestamp;
 	if (!vdef_coded_format_intersect(&frame_info->format,
 					 supported_formats,
 					 nb_supported_formats)) {
@@ -213,13 +247,15 @@ bool vdec_default_input_filter_internal(
 		return false;
 	}
 
-	if (frame_info->info.timestamp <= decoder->last_timestamp &&
-	    decoder->last_timestamp != UINT64_MAX) {
+	last_timestamp = atomic_load(&decoder->last_timestamp);
+
+	if (frame_info->info.timestamp <= last_timestamp &&
+	    last_timestamp != UINT64_MAX) {
 		ULOG_ERRNO("non-strictly-monotonic timestamp (%" PRIu64
 			   " <= %" PRIu64 ")",
 			   EPROTO,
 			   frame_info->info.timestamp,
-			   decoder->last_timestamp);
+			   last_timestamp);
 		return false;
 	}
 
@@ -237,7 +273,8 @@ void vdec_default_input_filter_internal_confirm_frame(
 	struct timespec cur_ts = {0, 0};
 
 	/* Save frame timestamp to last_timestamp */
-	decoder->last_timestamp = frame_info->info.timestamp;
+	uint_least64_t last_timestamp = frame_info->info.timestamp;
+	atomic_store(&decoder->last_timestamp, last_timestamp);
 
 	/* Set the input time ancillary data to the frame */
 	time_get_monotonic(&cur_ts);

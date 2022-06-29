@@ -78,6 +78,15 @@ VDEC_API enum vdec_decoder_implem vdec_get_auto_implem(void);
 
 
 /**
+ * Get an implementation for a given coded format
+ * @param format: coded format to support
+ * @return the decoder implementation, or VDEC_DECODER_IMPLEM_AUTO in case of
+ * error
+ */
+VDEC_API enum vdec_decoder_implem
+vdec_get_auto_implem_by_coded_format(struct vdef_coded_format *format);
+
+/**
  * Create a decoder instance.
  * The configuration and callbacks structures must be filled.
  * The instance handle is returned through the ret_obj parameter.
@@ -140,7 +149,21 @@ VDEC_API int vdec_destroy(struct vdec_decoder *self);
 
 
 /**
- * Set the parameter sets for decoding.
+ * Set the JPEG parameters for decoding.
+ * This function must be called prior to decoding (i.e. pushing buffer into
+ * the input queue). The ownership of the format_info struct stays
+ * with the caller. It is the caller's responsibility to ensure that the
+ * instance is configured to decode a MJPEG/JPEG stream.
+ * @param self decoder instance handle
+ * @param[in] format_info: image format information
+ * @return 0 on success, negative errno value in case of error
+ */
+VDEC_API int vdec_set_jpeg_params(struct vdec_decoder *self,
+				  const struct vdef_format_info *format_info);
+
+
+/**
+ * Set the H264 parameter sets for decoding.
  * This function must be called prior to decoding (i.e. pushing buffer into
  * the input queue) with the H.264 SPS and PPS. The SPS and PPS data will be
  * copied internally if necessary. The ownership of the SPS and PPS buffers

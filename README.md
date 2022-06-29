@@ -28,7 +28,6 @@ The library depends on the following Alchemy modules:
 * libh264
 * (optional) ffmpeg-libav (for FFmpeg support)
 * (optional) libvideo-buffers-generic (for FFmpeg support)
-* (optional) libmediacodec-wrapper (for Android MediaCodec support)
 * (optional) mmal (for Broadcom VideoCore IV)
 
 The library also depends on the following frameworks for iOS and MacOS only:

@@ -71,6 +71,10 @@
 #	include <video-decode/vdec_aml.h>
 #endif
 
+#ifdef BUILD_LIBVIDEO_DECODE_TURBOJPEG
+#	include <video-decode/vdec_turbojpeg.h>
+#endif
+
 
 static inline void xfree(void **ptr)
 {

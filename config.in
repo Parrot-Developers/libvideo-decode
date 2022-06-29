@@ -10,6 +10,12 @@
         help
             Enable the MediaCodec (Android) implementation in libvideo-decode.
 
+    config VDEC_TURBOJPEG
+        bool "vdec turbojpeg implementation"
+            default false
+        help
+            Enable the TurboJPEG implementation in libvideo-decode.
+
     config VDEC_VIDEOCOREMMAL
         bool "vdec videocoremmal implementation"
             default false

@@ -27,6 +27,7 @@
 #ifndef _VDEC_INTERNAL_H_
 #define _VDEC_INTERNAL_H_
 
+#include <stdatomic.h>
 #include <stdio.h>
 
 #include <h264/h264.h>
@@ -60,6 +61,8 @@ struct vdec_ops {
 	int (*stop)(struct vdec_decoder *base);
 
 	int (*destroy)(struct vdec_decoder *base);
+
+	int (*set_jpeg_params)(struct vdec_decoder *base);
 
 	int (*set_h264_ps)(struct vdec_decoder *base,
 			   const uint8_t *sps,
@@ -146,7 +149,7 @@ struct vdec_decoder {
 		FILE *output_yuv;
 		FILE *analysis;
 	} dbg;
-	uint64_t last_timestamp;
+	atomic_uint_least64_t last_timestamp;
 };
 
 
@@ -157,6 +160,19 @@ vdec_format_convert(struct mbuf_coded_video_frame *frame,
 
 VDEC_INTERNAL_API bool vdec_is_sync_frame(struct mbuf_coded_video_frame *frame,
 					  struct vdef_coded_frame *info);
+
+
+VDEC_INTERNAL_API void
+vdec_call_frame_output_cb(struct vdec_decoder *base,
+			  int status,
+			  struct mbuf_raw_video_frame *frame);
+
+
+VDEC_INTERNAL_API void vdec_call_flush_cb(struct vdec_decoder *base);
+
+
+VDEC_INTERNAL_API void vdec_call_stop_cb(struct vdec_decoder *base);
+
 
 /**
  * Default filter for the input frame queue.
