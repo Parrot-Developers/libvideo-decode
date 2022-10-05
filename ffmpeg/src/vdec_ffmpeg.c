@@ -945,7 +945,8 @@ static void *vdec_ffmpeg_decoder_thread(void *ptr)
 			ret = vdec_ffmpeg_start_flush(self);
 			if (ret < 0)
 				ULOG_ERRNO("vdec_ffmpeg_start_flush", -ret);
-			goto exit;
+			/* Don't exit thread here, let the decoder check the
+			 * input queue and pop all frames to exit properly */
 		}
 
 		timeout = (atomic_load(&self->flushing) &&
