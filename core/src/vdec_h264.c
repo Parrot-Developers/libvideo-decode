@@ -209,6 +209,7 @@ int vdec_h264_write_grey_idr(struct vdec_decoder *self,
 	}
 	nalu = (struct vdef_nalu){
 		.size = bs.off + 4,
+		.importance = 0,
 		.h264.type = H264_NALU_TYPE_SLICE_IDR,
 		.h264.slice_type = H264_SLICE_TYPE_I,
 		.h264.slice_mb_count = mb_total,

@@ -7,7 +7,7 @@ LOCAL_MODULE := libvideo-decode
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video decoding library
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/include
-LOCAL_CFLAGS := -DVDEC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_CFLAGS := -DVDEC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	src/vdec.c
 LOCAL_LIBRARIES := \
@@ -42,7 +42,7 @@ LOCAL_MODULE := libvideo-decode-core
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video decoding library: core files
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/core/include
-LOCAL_CFLAGS := -DVDEC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_CFLAGS := -DVDEC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	core/src/vdec_dbg.c \
 	core/src/vdec_enums.c \
@@ -72,7 +72,7 @@ LOCAL_MODULE := libvideo-decode-ffmpeg
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video decoding library: ffmpeg implementation
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/ffmpeg/include
-LOCAL_CFLAGS := -DVDEC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_CFLAGS := -DVDEC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	ffmpeg/src/vdec_ffmpeg.c
 LOCAL_LIBRARIES := \

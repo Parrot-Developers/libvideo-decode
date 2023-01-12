@@ -315,6 +315,7 @@ int vdec_copy_coded_frame_as_metadata(struct mbuf_coded_video_frame *frame,
 	 * that does not provide any NALU */
 	struct vdef_nalu nalu = {
 		.size = 0,
+		.importance = 0,
 	};
 	ret = mbuf_coded_video_frame_add_nalu(meta_frame, mem, 0, &nalu);
 	if (ret < 0) {

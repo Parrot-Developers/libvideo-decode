@@ -24,7 +24,6 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define _GNU_SOURCE
 #include <stdio.h>
 
 #define ULOG_TAG vdec_ffmpeg
@@ -219,6 +218,7 @@ vdec_ffmpeg_set_frame_metadata(struct vdec_ffmpeg *self,
 		/* Just use the first format available (there always seems to
 		 * be only 1 format anyway) */
 		sw_frame->format = *formats;
+		av_freep(&formats);
 
 		ret = av_hwframe_transfer_data(sw_frame, frame, 0);
 		if (ret < 0) {

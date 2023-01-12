@@ -42,22 +42,24 @@ static void initialize_supported_formats(void)
 	supported_formats[0] = vdef_jpeg_jfif;
 }
 
-static void flush_complete(struct vdec_turbojpeg *self)
+static void call_flush_done(void *userdata)
 {
-	/* Call the flush callback if defined */
+	struct vdec_turbojpeg *self = userdata;
+
 	vdec_call_flush_cb(self->base);
 }
 
-static void stop_complete(struct vdec_turbojpeg *self)
+static void call_stop_done(void *userdata)
 {
-	/* Call the stop callback if defined */
+	struct vdec_turbojpeg *self = userdata;
+
 	vdec_call_stop_cb(self->base);
 }
 
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct vdec_turbojpeg *self = userdata;
-	int ret;
+	int ret, err;
 	char message;
 
 	do {
@@ -71,10 +73,20 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 
 		switch (message) {
 		case VDEC_MSG_FLUSH:
-			flush_complete(self);
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_flush_done, self, self);
+			if (err < 0) {
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
+			}
 			break;
 		case VDEC_MSG_STOP:
-			stop_complete(self);
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_stop_done, self, self);
+			if (err < 0) {
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
+			}
 			break;
 		default:
 			ULOGE("unknown message: %c", message);
@@ -629,6 +641,10 @@ static int destroy(struct vdec_decoder *base)
 		if (err < 0)
 			ULOGE("%s", tjGetErrorStr());
 	}
+
+	err = pomp_loop_idle_remove_by_cookie(base->loop, self);
+	if (err < 0)
+		ULOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
 
 	xfree((void **)&self);
 	base->derived = NULL;

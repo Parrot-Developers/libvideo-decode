@@ -27,7 +27,6 @@
 #ifndef _VDEC_CORE_PRIV_H_
 #define _VDEC_CORE_PRIV_H_
 
-#define _GNU_SOURCE
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>

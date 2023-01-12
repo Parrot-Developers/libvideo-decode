@@ -45,7 +45,7 @@ static void initialize_supported_formats(void)
 static void flush_complete(struct vdec_videotoolbox *self)
 {
 	vdec_call_flush_cb(self->base);
-	self->need_sync = 1;
+	self->need_sync = true;
 }
 
 
@@ -432,7 +432,7 @@ static int vdec_videotoolbox_do_flush(struct vdec_videotoolbox *self)
 	int ret;
 	OSStatus osstatus;
 
-	if (self->flush_discard) {
+	if (atomic_load(&self->flush_discard)) {
 		/* Flush the queues */
 		ret = mbuf_coded_video_frame_queue_flush(self->in_queue);
 		if (ret < 0) {
@@ -447,7 +447,7 @@ static int vdec_videotoolbox_do_flush(struct vdec_videotoolbox *self)
 	}
 
 	/* Flush the decoder */
-	self->flushing = 1;
+	atomic_store(&self->flushing, true);
 	if (self->base->configured) {
 		osstatus = VTDecompressionSessionWaitForAsynchronousFrames(
 			self->decompress_ref);
@@ -461,7 +461,7 @@ static int vdec_videotoolbox_do_flush(struct vdec_videotoolbox *self)
 			return ret;
 		}
 	}
-	self->flushing = 0;
+	atomic_store(&self->flushing, false);
 
 	/* Call the flush callback on the loop */
 	struct vdec_videotoolbox_message message = {
@@ -471,7 +471,7 @@ static int vdec_videotoolbox_do_flush(struct vdec_videotoolbox *self)
 	if (ret < 0)
 		ULOG_ERRNO("mbox_push", -ret);
 
-	self->flush = 0;
+	atomic_store(&self->flush, false);
 
 	return 0;
 }
@@ -877,7 +877,7 @@ vdec_videotoolbox_buffer_push_one(struct vdec_videotoolbox *self,
 	if (self->need_sync) {
 		if (vdec_is_sync_frame(in_frame, &in_info)) {
 			ULOGI("frame is a sync point");
-			self->need_sync = 0;
+			self->need_sync = false;
 		} else {
 			if (self->base->config.encoding == VDEF_ENCODING_H264 &&
 			    self->base->config.gen_grey_idr) {
@@ -891,7 +891,7 @@ vdec_videotoolbox_buffer_push_one(struct vdec_videotoolbox *self,
 						-ret);
 					goto out;
 				}
-				self->need_sync = 0;
+				self->need_sync = false;
 			} else {
 				ULOGI("frame is not a sync point, "
 				      "discarding frame");
@@ -1043,7 +1043,7 @@ static void vdec_videotoolbox_frame_output_cb(void *decompress_output_ref_con,
 		goto out;
 
 	/* Discard the buffer when flushing with frames discarding */
-	if ((self->flushing) && (self->flush_discard)) {
+	if (atomic_load(&self->flushing) && atomic_load(&self->flush_discard)) {
 		ULOGI("frame discarded (flushing)"); /* TODO: debug */
 		goto out;
 	}
@@ -1129,7 +1129,7 @@ static void input_event_cb(struct pomp_evt *evt, void *userdata)
 	}
 	if (ret != -EAGAIN)
 		ULOG_ERRNO("mbuf_coded_video_frame_queue_pop", -ret);
-	if (self->flush && ret == -EAGAIN) {
+	if (atomic_load(&self->flush) && ret == -EAGAIN) {
 		/* Flush without discarding frames */
 		ret = vdec_videotoolbox_do_flush(self);
 		if (ret < 0)
@@ -1193,21 +1193,25 @@ static void *vdec_videotoolbox_decoder_thread(void *ptr)
 		goto exit;
 	}
 
-	while ((!self->should_stop) || (self->flush)) {
+	while (!atomic_load(&self->should_stop) || atomic_load(&self->flush)) {
 		/* Flush discarding all frames */
-		if ((self->flush) && (self->flush_discard)) {
+		if (atomic_load(&self->flush) &&
+		    atomic_load(&self->flush_discard)) {
 			ret = vdec_videotoolbox_do_flush(self);
 			if (ret < 0)
 				ULOG_ERRNO("vdec_videotoolbox_do_flush", -ret);
 			continue;
 		}
 
-		timeout = ((self->flush) && (!self->flush_discard)) ? 0 : 5;
+		timeout = (atomic_load(&self->flush) &&
+			   !atomic_load(&self->flush_discard))
+				  ? 0
+				  : 5;
 
 		ret = pomp_loop_wait_and_process(loop, timeout);
 		if (ret < 0 && ret != -ETIMEDOUT) {
 			ULOG_ERRNO("pomp_loop_wait_and_process", -ret);
-			if (!self->should_stop) {
+			if (!atomic_load(&self->should_stop)) {
 				/* Avoid looping on errors */
 				usleep(5000);
 			}
@@ -1257,7 +1261,7 @@ static int stop(struct vdec_decoder *base)
 	self = base->derived;
 
 	/* Stop the decoding thread */
-	self->should_stop = 1;
+	atomic_store(&self->should_stop, true);
 	base->configured = 0;
 
 	return 0;
@@ -1395,7 +1399,7 @@ static int create(struct vdec_decoder *base)
 
 	switch (base->config.encoding) {
 	case VDEF_ENCODING_H264:
-		self->need_sync = 1;
+		self->need_sync = true;
 		break;
 	default:
 		break;
@@ -1456,7 +1460,7 @@ static int create(struct vdec_decoder *base)
 		ULOG_ERRNO("pthread_create", -ret);
 		goto error;
 	} else {
-		self->thread_launched = 1;
+		self->thread_launched = true;
 	}
 
 	return 0;
@@ -1477,8 +1481,8 @@ static int flush(struct vdec_decoder *base, int discard)
 
 	self = base->derived;
 
-	self->flush = 1;
-	self->flush_discard = discard;
+	atomic_store(&self->flush, true);
+	atomic_store(&self->flush_discard, (bool)discard);
 
 	return 0;
 }

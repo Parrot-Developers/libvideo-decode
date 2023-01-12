@@ -29,6 +29,9 @@
 
 #include <arpa/inet.h>
 
+#include <stdatomic.h>
+#include <stdbool.h>
+
 #include <VideoToolbox/VideoToolbox.h>
 
 #include <futils/futils.h>
@@ -66,22 +69,22 @@ struct vdec_videotoolbox {
 	struct pomp_evt *out_queue_evt;
 	CMVideoFormatDescriptionRef format_desc_ref;
 	VTDecompressionSessionRef decompress_ref;
-	int flushing;
+	atomic_bool flushing;
 
 	pthread_t thread;
-	int thread_launched;
-	int should_stop;
-	int flush;
-	int flush_discard;
+	bool thread_launched;
+	atomic_bool should_stop;
+	atomic_bool flush;
+	atomic_bool flush_discard;
 	struct mbox *mbox;
-	int need_sync;
+	bool need_sync;
 };
 
 
 struct vdec_videotoolbox_cvbuffer {
 	CVBufferRef ref;
 	CVPixelBufferLockFlags lock_flags;
-	int cpu_locked;
+	bool cpu_locked;
 };
 
 #endif /* !_VDEC_VIDEOTOOLBOX_PRIV_H_ */

@@ -505,6 +505,7 @@ static int append_to_frame(struct vdec_prog *self,
 
 	struct vdef_nalu nalu = {
 		.size = len + nalu_offset,
+		.importance = 0,
 	};
 	switch (self->in_info.format.encoding) {
 	case VDEF_ENCODING_H264:
@@ -1635,6 +1636,7 @@ int main(int argc, char **argv)
 		break;
 	}
 
+	self->in_info.info.timescale = 1000000;
 	if (self->config.encoding != VDEF_ENCODING_MJPEG) {
 		byte_stream.encoding = avcc.encoding = self->config.encoding;
 		self->config.implem =
