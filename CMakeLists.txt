@@ -9,6 +9,9 @@ set(LIB_SOURCES
 add_library(video-decode ${LIB_SOURCES})
 
 option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
+set_target_properties(video-decode PROPERTIES
+                    POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
+)
 
 target_include_directories(video-decode PUBLIC
                             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -39,7 +42,9 @@ set(LIB_SOURCES
 
 add_library(video-decode-core ${LIB_SOURCES})
 
-option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
+set_target_properties(video-decode-core PROPERTIES
+                    POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
+)
 
 target_include_directories(video-decode-core PUBLIC
                             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core/include>
@@ -73,7 +78,9 @@ set(LIB_SOURCES
 
 add_library(video-decode-ffmpeg ${LIB_SOURCES})
 
-option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
+set_target_properties(video-decode-ffmpeg PROPERTIES
+                    POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
+)
 
 target_include_directories(video-decode-ffmpeg PUBLIC
                             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg/include>
@@ -90,8 +97,8 @@ if(WIN32)
 endif()
 
 find_package(FFMPEG REQUIRED)
-target_include_directories(video-decode-ffmpeg PRIVATE ${FFMPEG_INCLUDE_DIRS})
-target_link_directories(video-decode-ffmpeg PRIVATE ${FFMPEG_LIBRARY_DIRS})
+target_include_directories(video-decode-ffmpeg ${FFMPEG_INCLUDE_DIRS})
+target_link_directories(video-decode-ffmpeg ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(video-decode-ffmpeg ${FFMPEG_LIBRARIES})
 
 target_link_libraries(video-decode-ffmpeg
