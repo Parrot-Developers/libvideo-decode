@@ -76,7 +76,7 @@ set(LIB_SOURCES
       ffmpeg/src/vdec_ffmpeg.c
 )
 
-add_library(video-decode-ffmpeg ${LIB_SOURCES})
+add_library(video-decode-ffmpeg STATIC ${LIB_SOURCES})
 
 set_target_properties(video-decode-ffmpeg PROPERTIES
                     POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
@@ -93,15 +93,15 @@ target_compile_options(video-decode-ffmpeg PRIVATE "-fvisibility=hidden")
 target_compile_options(video-decode-ffmpeg PRIVATE "-std=gnu99")
 
 if(WIN32)
-  target_link_libraries(video-decode-ffmpeg ws2_32)
+  target_link_libraries(video-decode-ffmpeg PRIVATE ws2_32)
 endif()
 
 find_package(FFMPEG REQUIRED)
-target_include_directories(video-decode-ffmpeg ${FFMPEG_INCLUDE_DIRS})
-target_link_directories(video-decode-ffmpeg ${FFMPEG_LIBRARY_DIRS})
-target_link_libraries(video-decode-ffmpeg ${FFMPEG_LIBRARIES})
+target_include_directories(video-decode-ffmpeg PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_directories(video-decode-ffmpeg PRIVATE ${FFMPEG_LIBRARY_DIRS})
+target_link_libraries(video-decode-ffmpeg PRIVATE ${FFMPEG_LIBRARIES})
 
-target_link_libraries(video-decode-ffmpeg
+target_link_libraries(video-decode-ffmpeg PRIVATE
                         futils 
                         media-buffers 
                         media-buffers-memory 
