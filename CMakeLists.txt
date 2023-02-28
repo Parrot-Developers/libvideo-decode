@@ -10,6 +10,11 @@ add_library(video-decode ${LIB_SOURCES})
 
 option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
 
+# message(" SOME PRINT OUTS : ")
+# message($<INSTALL_INTERFACE:include>)
+# message($<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+
+
 target_include_directories(video-decode PUBLIC
                             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
                             $<INSTALL_INTERFACE:include>
@@ -26,7 +31,7 @@ endif()
 
 target_link_libraries(video-decode h264 pomp h265 ulog video-decode-core video-defs)
 # if option TODO
-target_link_libraries(video-decode video-decode-ffmpeg)
+# target_link_libraries(video-decode video-decode-ffmpeg)
 
 # video-decode-core
 set(LIB_SOURCES
@@ -89,7 +94,24 @@ if(WIN32)
   target_link_libraries(video-decode-ffmpeg ws2_32)
 endif()
 
-find_package(FFMPEG REQUIRED)
+# find_package(FFMPEG REQUIRED)
+set(FFMPEG_LIBRARIES
+    avcodec 
+    avdevice 
+    avfilter 
+    avformat 
+    avutil 
+    swresample 
+    swscale)
+
+set(FFMPEG_INCLUDE_DIRS
+    /se/sw/contribs/centos7-gcc11-x86_64/ffmpeg/n4.1-contrib20200311.01/include
+)
+
+set(FFMPEG_LIBRARY_DIRS
+    /se/sw/contribs/centos7-gcc11-x86_64/ffmpeg/n4.1-contrib20200311.01/lib
+)
+
 target_include_directories(video-decode-ffmpeg PRIVATE ${FFMPEG_INCLUDE_DIRS})
 target_link_directories(video-decode-ffmpeg PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(video-decode-ffmpeg ${FFMPEG_LIBRARIES})
