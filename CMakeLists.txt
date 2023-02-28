@@ -6,7 +6,7 @@ set(LIB_SOURCES
         src/vdec.c
 )
 
-add_library(video-decode ${LIB_SOURCES})
+add_library(video-decode STATIC ${LIB_SOURCES})
 
 option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
 set_target_properties(video-decode PROPERTIES
@@ -19,6 +19,7 @@ target_include_directories(video-decode PUBLIC
 )
 
 target_compile_definitions(video-decode PRIVATE "VDEC_API_EXPORTS")
+target_compile_definitions(video-decode PRIVATE "BUILD_LIBVIDEO_DECODE_FFMPEG")
 target_compile_definitions(video-decode PRIVATE "_GNU_SOURCE")
 target_compile_options(video-decode PRIVATE "-fvisibility=hidden")
 target_compile_options(video-decode PRIVATE "-std=gnu99")
@@ -40,7 +41,7 @@ set(LIB_SOURCES
     core/src/vdec_h265.c
 )
 
-add_library(video-decode-core ${LIB_SOURCES})
+add_library(video-decode-core STATIC ${LIB_SOURCES})
 
 set_target_properties(video-decode-core PROPERTIES
                     POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
@@ -52,6 +53,7 @@ target_include_directories(video-decode-core PUBLIC
 )
 
 target_compile_definitions(video-decode-core PRIVATE "VDEC_API_EXPORTS")
+target_compile_definitions(video-decode-core PRIVATE "BUILD_LIBVIDEO_DECODE_FFMPEG")
 target_compile_definitions(video-decode-core PRIVATE "_GNU_SOURCE")
 target_compile_options(video-decode-core PRIVATE "-fvisibility=hidden")
 target_compile_options(video-decode-core PRIVATE "-std=gnu99")
