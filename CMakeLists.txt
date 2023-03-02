@@ -78,7 +78,7 @@ target_compile_definitions(${PROJECT_NAME}-ffmpeg PRIVATE "_GNU_SOURCE")
 target_compile_options(${PROJECT_NAME}-ffmpeg PRIVATE "-fvisibility=hidden")
 target_compile_options(${PROJECT_NAME}-ffmpeg PRIVATE "-std=gnu99")
 
-# find_package(FFMPEG REQUIRED)
+find_package(FFMPEG REQUIRED)
 set(FFMPEG_LIBRARIES
     avcodec 
     avdevice 
@@ -113,6 +113,7 @@ else()
                               h265 
                               ulog 
                               ${PROJECT_NAME}-core 
+                              ${PROJECT_NAME}-ffmpeg
                               video-defs
                               )
 
