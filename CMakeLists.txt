@@ -1,12 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 project(video-decode VERSION 1.0)
 
-# checks if set up rpath exists for install
-if(COMMAND set_up_rpath)
-    set_up_rpath()
-else()
-    message("Set up rpath not defined!")
-endif()
 
 # ${PROJECT_NAME}
 set(LIB_SOURCES
@@ -15,9 +9,16 @@ set(LIB_SOURCES
 
 add_library(${PROJECT_NAME} ${LIB_SOURCES})
 
+# checks if set up rpath exists for install
+if(COMMAND set_up_rpath)
+    set_up_rpath()
+else()
+    message("Set up rpath not defined!")
+endif()
+
 option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
 
-set_target_properties(video-decode PROPERTIES
+set_target_properties(${PROJECT_NAME} PROPERTIES
                     POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
 )
 
