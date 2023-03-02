@@ -16,6 +16,9 @@ set(LIB_SOURCES
 add_library(${PROJECT_NAME} ${LIB_SOURCES})
 
 option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
+set_target_properties(video-decode PROPERTIES
+                    POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
+)
 
 # message(" SOME PRINT OUTS : ")
 # message($<INSTALL_INTERFACE:include>)
@@ -28,11 +31,12 @@ target_include_directories(${PROJECT_NAME} PUBLIC
                             $<INSTALL_INTERFACE:include>
 )
 
-
 target_compile_definitions(${PROJECT_NAME} PRIVATE "VDEC_API_EXPORTS")
+target_compile_definitions(${PROJECT_NAME} PRIVATE "BUILD_LIBVIDEO_DECODE_FFMPEG")
 target_compile_definitions(${PROJECT_NAME} PRIVATE "_GNU_SOURCE")
 target_compile_options(${PROJECT_NAME} PRIVATE "-fvisibility=hidden")
 target_compile_options(${PROJECT_NAME} PRIVATE "-std=gnu99")
+
 
 #  -- CORE
 
@@ -46,7 +50,9 @@ set(LIB_SOURCES
 
 add_library(${PROJECT_NAME}-core ${LIB_SOURCES})
 
-option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
+set_target_properties(video-decode-core PROPERTIES
+                    POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
+)
 
 target_include_directories(${PROJECT_NAME}-core PUBLIC
                             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core/include>
@@ -57,6 +63,7 @@ target_compile_definitions(${PROJECT_NAME}-core PRIVATE "VDEC_API_EXPORTS")
 target_compile_definitions(${PROJECT_NAME}-core PRIVATE "_GNU_SOURCE")
 target_compile_options(${PROJECT_NAME}-core PRIVATE "-fvisibility=hidden")
 target_compile_options(${PROJECT_NAME}-core PRIVATE "-std=gnu99")
+target_compile_definitions(${PROJECT_NAME}-core PRIVATE "BUILD_LIBVIDEO_DECODE_FFMPEG")
 
 
 # -- ffmpeg
@@ -66,7 +73,9 @@ set(LIB_SOURCES
 
 add_library(${PROJECT_NAME}-ffmpeg ${LIB_SOURCES})
 
-option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
+set_target_properties(video-decode-ffmpeg PROPERTIES
+                    POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
+)
 
 target_include_directories(${PROJECT_NAME}-ffmpeg PUBLIC
                             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg/include>
@@ -78,7 +87,7 @@ target_compile_definitions(${PROJECT_NAME}-ffmpeg PRIVATE "_GNU_SOURCE")
 target_compile_options(${PROJECT_NAME}-ffmpeg PRIVATE "-fvisibility=hidden")
 target_compile_options(${PROJECT_NAME}-ffmpeg PRIVATE "-std=gnu99")
 
-# find_package(FFMPEG REQUIRED)
+find_package(FFMPEG)
 set(FFMPEG_LIBRARIES
     avcodec 
     avdevice 
@@ -97,8 +106,8 @@ else()
 
     message("FFMPEG INCLUDE DIRS: ") 
     message(${FFMPEG_INCLUDE_DIRS}) 
-    target_include_directories(${PROJECT_NAME}-ffmpeg PRIVATE ${FFMPEG_INCLUDE_DIRS})
 
+    target_include_directories(${PROJECT_NAME}-ffmpeg PRIVATE ${FFMPEG_INCLUDE_DIRS})
     target_link_directories(${PROJECT_NAME}-ffmpeg PRIVATE ${FFMPEG_LIBRARY_DIRS})
 
     if(WIN32)
