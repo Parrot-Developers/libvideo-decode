@@ -952,7 +952,7 @@ static void *vdec_ffmpeg_decoder_thread(void *ptr)
 		timeout = (atomic_load(&self->flushing) &&
 			   !atomic_load(&self->flush_discard))
 				  ? 0
-				  : 5;
+				  : 50;
 
 		ret = pomp_loop_wait_and_process(loop, timeout);
 		if (ret < 0 && ret != -ETIMEDOUT) {
