@@ -141,6 +141,11 @@ else()
                                video-metadata
                                )
 
+	file(GLOB ffmpeg_dll "${FFMPEG_LIBRARY_DIRS}/../bin/*.dll")
+	message(${ffmpeg_dll})
+        install(FILES ${ffmpeg_dll} DESTINATION bin)
+
+
 
         target_link_libraries(${PROJECT_NAME}-core 
                               PRIVATE 
