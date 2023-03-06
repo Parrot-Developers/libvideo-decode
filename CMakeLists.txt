@@ -7,11 +7,11 @@ set(LIB_SOURCES
         src/vdec.c
 )
 
-add_library(${PROJECT_NAME} ${LIB_SOURCES})
+add_library(${PROJECT_NAME} STATIC ${LIB_SOURCES})
 
 # checks if set up rpath exists for install
 if(COMMAND set_up_rpath)
-    set_up_rpath()
+    #set_up_rpath()
 else()
     message("Set up rpath not defined!")
 endif()
@@ -47,7 +47,7 @@ set(LIB_SOURCES
     core/src/vdec_h265.c
 )
 
-add_library(${PROJECT_NAME}-core ${LIB_SOURCES})
+add_library(${PROJECT_NAME}-core STATIC ${LIB_SOURCES})
 
 set_target_properties(video-decode-core PROPERTIES
                     POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
@@ -70,7 +70,7 @@ set(LIB_SOURCES
       ffmpeg/src/vdec_ffmpeg.c
 )
 
-add_library(${PROJECT_NAME}-ffmpeg ${LIB_SOURCES})
+add_library(${PROJECT_NAME}-ffmpeg STATIC ${LIB_SOURCES})
 
 set_target_properties(video-decode-ffmpeg PROPERTIES
                     POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
@@ -87,17 +87,17 @@ target_compile_options(${PROJECT_NAME}-ffmpeg PRIVATE "-fvisibility=hidden")
 target_compile_options(${PROJECT_NAME}-ffmpeg PRIVATE "-std=gnu99")
 
 find_package(FFMPEG)
-set(FFMPEG_LIBRARIES
-    avcodec 
-    avdevice 
-    avfilter 
-    avformat 
-    avutil 
-    swresample 
-    swscale
-)
-
-
+if(NOT DEFINED FFMPEG_LIBRARIES) 
+    set(FFMPEG_LIBRARIES
+        avcodec 
+        avdevice 
+        avfilter 
+        avformat 
+        avutil 
+        swresample 
+        swscale
+    )
+endif()
 
 if((NOT DEFINED FFMPEG_INCLUDE_DIRS OR NOT DEFINED FFMPEG_LIBRARY_DIRS))
     message(FATAL_ERROR "Need to set FFMPEG_INCLUDE_DIRS and FFMPEG_LIBRARY_DIRS!")
