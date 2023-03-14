@@ -215,6 +215,7 @@ else()
                 RESOLVED_DEPENDENCIES_VAR _r_deps
                 UNRESOLVED_DEPENDENCIES_VAR _u_deps
                 DIRECTORIES ${DEPENDENCY_PATHS}
+                POST_EXCLUDE_REGEXES "^/lib" "^/usr/lib"
             )
             foreach(_file ${_r_deps})
                 file(INSTALL
