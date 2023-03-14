@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.20)
 project(video-decode VERSION 1.0)
 
 
@@ -7,7 +7,7 @@ set(LIB_SOURCES
         src/vdec.c
 )
 
-add_library(${PROJECT_NAME} STATIC ${LIB_SOURCES})
+add_library(${PROJECT_NAME} SHARED ${LIB_SOURCES})
 
 # checks if set up rpath exists for install
 if(COMMAND set_up_rpath)
@@ -47,9 +47,9 @@ set(LIB_SOURCES
     core/src/vdec_h265.c
 )
 
-add_library(${PROJECT_NAME}-core STATIC ${LIB_SOURCES})
+add_library(${PROJECT_NAME}-core SHARED ${LIB_SOURCES})
 
-set_target_properties(video-decode-core PROPERTIES
+set_target_properties(${PROJECT_NAME}-core PROPERTIES
                     POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
 )
 
@@ -70,7 +70,7 @@ set(LIB_SOURCES
       ffmpeg/src/vdec_ffmpeg.c
 )
 
-add_library(${PROJECT_NAME}-ffmpeg STATIC ${LIB_SOURCES})
+add_library(${PROJECT_NAME}-ffmpeg SHARED ${LIB_SOURCES})
 
 set_target_properties(video-decode-ffmpeg PROPERTIES
                     POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
@@ -103,12 +103,20 @@ if((NOT DEFINED FFMPEG_INCLUDE_DIRS OR NOT DEFINED FFMPEG_LIBRARY_DIRS))
     message(FATAL_ERROR "Need to set FFMPEG_INCLUDE_DIRS and FFMPEG_LIBRARY_DIRS!")
 else()
 
-    message(INFO " FFMPEG SOURCES: ") 
-    message(INFO " 1. FFMPEG INCLUDE DIRS: ${FFMPEG_INCLUDE_DIRS}") 
-    message(INFO " 2. FFMPEG LIBRARY DIRS: ${FFMPEG_LIBRARY_DIRS}") 
+    if(CMAKE_BUILD_TYPE MATCHES DEBUG)
+        list(FIND FFMPEG_LIBRARY_DIRS debug lib_index)
+    else()
+        list(FIND FFMPEG_LIBRARY_DIRS optimized lib_index)
+    endif()
+    math(EXPR lib_index "${lib_index} + 1")
+    list(GET FFMPEG_LIBRARY_DIRS ${lib_index} FFMPEG_LIBRARY_DIRECTORY)
 
-    target_include_directories(${PROJECT_NAME}-ffmpeg PRIVATE ${FFMPEG_INCLUDE_DIRS})
-    target_link_directories(${PROJECT_NAME}-ffmpeg PRIVATE ${FFMPEG_LIBRARY_DIRS})
+    message(INFO " FFMPEG SOURCES: ") 
+    message(INFO " 1. FFMPEG_INCLUDE_DIRS: ${FFMPEG_INCLUDE_DIRS}") 
+    message(INFO " 2. FFMPEG_LIBRARY_DIRECTORY: ${FFMPEG_LIBRARY_DIRECTORY}") 
+
+    target_include_directories(${PROJECT_NAME}-ffmpeg PUBLIC ${FFMPEG_INCLUDE_DIRS})
+    target_link_directories(${PROJECT_NAME}-ffmpeg PUBLIC ${FFMPEG_LIBRARY_DIRECTORY})
 
     if(WIN32)
 
@@ -141,26 +149,22 @@ else()
                                video-metadata
                                )
 
-	file(GLOB ffmpeg_dll "${FFMPEG_LIBRARY_DIRS}/../bin/*.dll")
-	message(STATUS ${ffmpeg_dll})
-        install(FILES ${ffmpeg_dll} DESTINATION bin)
-
-
-
         target_link_libraries(${PROJECT_NAME}-core 
-                              PRIVATE 
-                              ws2_32
-                              pomp
-                              futils 
-                              h264 
-                              h265 
-                              media-buffers 
-                              media-buffers-memory 
-                              ulog 
-                              video-defs 
-                              video-metadata
+                                    PRIVATE 
+                                    ws2_32
+                                    pomp
+                                    futils 
+                                    h264 
+                                    h265 
+                                    media-buffers 
+                                    media-buffers-memory 
+                                    ulog 
+                                    video-defs 
+                                    video-metadata
                               )
 
+    install(CODE "file(GLOB dll_files \"${CMAKE_CURRENT_BINARY_DIR}/*.dll\")")
+    install(CODE "file(INSTALL DESTINATION \"\$\{CMAKE_INSTALL_PREFIX\}/bin\" TYPE SHARED_LIBRARY FILES \$\{dll_files\})")
 
     else()
 
@@ -203,6 +207,25 @@ else()
                                 video-defs 
                                 video-metadata
         )
+
+        install(CODE "set(DEPENDENCY_PATHS \"${FFMPEG_LIBRARY_DIRECTORY}\")")
+        install(CODE [[
+            file(GET_RUNTIME_DEPENDENCIES
+                LIBRARIES $<TARGET_FILE:video-decode-ffmpeg>
+                RESOLVED_DEPENDENCIES_VAR _r_deps
+                UNRESOLVED_DEPENDENCIES_VAR _u_deps
+                DIRECTORIES ${DEPENDENCY_PATHS}
+            )
+            foreach(_file ${_r_deps})
+                file(INSTALL
+                DESTINATION "${CMAKE_INSTALL_PREFIX}/lib"
+                TYPE SHARED_LIBRARY
+                FOLLOW_SYMLINK_CHAIN
+                FILES "${_file}"
+                )
+            endforeach()
+            list(LENGTH _u_deps _u_length)
+        ]])
 
     endif()
 
