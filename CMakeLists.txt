@@ -210,13 +210,11 @@ else()
                                 video-metadata
         )
 
-        install(CODE "set(DEPENDENCY_PATHS \"${FFMPEG_LIBRARY_DIRECTORY}\")")
         install(CODE [[
             file(GET_RUNTIME_DEPENDENCIES
                 LIBRARIES $<TARGET_FILE:video-decode-ffmpeg>
                 RESOLVED_DEPENDENCIES_VAR _r_deps
                 UNRESOLVED_DEPENDENCIES_VAR _u_deps
-                DIRECTORIES ${DEPENDENCY_PATHS}
                 POST_EXCLUDE_REGEXES "^/lib" "^/usr/lib"
             )
             foreach(_file ${_r_deps})
