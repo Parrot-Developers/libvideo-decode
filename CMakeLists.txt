@@ -86,7 +86,9 @@ target_compile_definitions(${PROJECT_NAME}-ffmpeg PRIVATE "_GNU_SOURCE")
 target_compile_options(${PROJECT_NAME}-ffmpeg PRIVATE "-fvisibility=hidden")
 target_compile_options(${PROJECT_NAME}-ffmpeg PRIVATE "-std=gnu99")
 
-find_package(FFMPEG)
+if((NOT DEFINED FFMPEG_INCLUDE_DIRS OR NOT DEFINED FFMPEG_LIBRARY_DIRS))
+    find_package(FFMPEG REQUIRED)
+endif()
 if(NOT DEFINED FFMPEG_LIBRARIES) 
     set(FFMPEG_LIBRARIES
         avcodec 
