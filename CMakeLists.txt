@@ -72,7 +72,7 @@ set(LIB_SOURCES
 
 add_library(${PROJECT_NAME}-ffmpeg SHARED ${LIB_SOURCES})
 
-set_target_properties(video-decode-ffmpeg PROPERTIES
+set_target_properties(${PROJECT_NAME}-ffmpeg PROPERTIES
                     POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
 )
 
@@ -165,8 +165,24 @@ else()
                                     video-metadata
                               )
 
-    install(CODE "file(GLOB dll_files \"${CMAKE_CURRENT_BINARY_DIR}/*.dll\")")
-    install(CODE "file(INSTALL DESTINATION \"\$\{CMAKE_INSTALL_PREFIX\}/bin\" TYPE SHARED_LIBRARY FILES \$\{dll_files\})")
+    install(CODE "set(FFMPEG_LIBRARY_DIRECTORY \"${FFMPEG_LIBRARY_DIRECTORY}/../bin\")")
+    install(CODE [[
+    file(GET_RUNTIME_DEPENDENCIES
+        LIBRARIES $<TARGET_FILE:video-decode-ffmpeg>
+        RESOLVED_DEPENDENCIES_VAR _r_deps
+        UNRESOLVED_DEPENDENCIES_VAR _u_deps
+        DIRECTORIES ${FFMPEG_LIBRARY_DIRECTORY}
+        POST_EXCLUDE_REGEXES ".*system32/.*\\.dll"
+    )
+    foreach(_file ${_r_deps})
+        file(INSTALL
+            DESTINATION "${CMAKE_INSTALL_PREFIX}/bin"
+            TYPE SHARED_LIBRARY
+            FOLLOW_SYMLINK_CHAIN
+            FILES "${_file}"
+        )
+    endforeach()
+]])
 
     else()
 
@@ -225,7 +241,6 @@ else()
                 FILES "${_file}"
                 )
             endforeach()
-            list(LENGTH _u_deps _u_length)
         ]])
 
     endif()
