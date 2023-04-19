@@ -39,3 +39,9 @@
             default false
         help
             Enable the Amlogic implementation in libvideo-decode.
+
+    config VDEC_QCOM
+        bool "vdec qcom implementation"
+            default false
+        help
+            Enable the Qualcomm implementation in libvideo-decode.

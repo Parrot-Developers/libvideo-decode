@@ -42,15 +42,19 @@ static void initialize_supported_formats(void)
 }
 
 
-static void flush_complete(struct vdec_videotoolbox *self)
+static void call_flush_done(void *userdata)
 {
+	struct vdec_videotoolbox *self = userdata;
+
 	vdec_call_flush_cb(self->base);
 	self->need_sync = true;
 }
 
 
-static void stop_complete(struct vdec_videotoolbox *self)
+static void call_stop_done(void *userdata)
 {
+	struct vdec_videotoolbox *self = userdata;
+
 	vdec_call_stop_cb(self->base);
 }
 
@@ -64,7 +68,7 @@ static void decoder_error(struct vdec_videotoolbox *self, int error)
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct vdec_videotoolbox *self = userdata;
-	int ret;
+	int ret, err;
 	struct vdec_videotoolbox_message message;
 
 	do {
@@ -78,10 +82,18 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 
 		switch (message.type) {
 		case VDEC_VIDEOTOOLBOX_MESSAGE_TYPE_FLUSH:
-			flush_complete(self);
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_flush_done, self, self);
+			if (err < 0)
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
 			break;
 		case VDEC_VIDEOTOOLBOX_MESSAGE_TYPE_STOP:
-			stop_complete(self);
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_stop_done, self, self);
+			if (err < 0)
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
 			break;
 		case VDEC_VIDEOTOOLBOX_MESSAGE_TYPE_ERROR:
 			decoder_error(self, message.error);
@@ -1332,6 +1344,11 @@ static int destroy(struct vdec_decoder *base)
 	}
 	if (self->format_desc_ref)
 		CFRelease(self->format_desc_ref);
+
+	err = pomp_loop_idle_remove_by_cookie(base->loop, self);
+	if (err < 0)
+		ULOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
+
 	free(self);
 
 	return 0;

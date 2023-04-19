@@ -74,6 +74,10 @@
 #	include <video-decode/vdec_turbojpeg.h>
 #endif
 
+#ifdef BUILD_LIBVIDEO_DECODE_QCOM
+#	include <video-decode/vdec_qcom.h>
+#endif
+
 
 static inline void xfree(void **ptr)
 {

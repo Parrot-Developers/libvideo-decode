@@ -45,6 +45,8 @@ const char *vdec_decoder_implem_str(enum vdec_decoder_implem implem)
 		return "AML";
 	case VDEC_DECODER_IMPLEM_TURBOJPEG:
 		return "TURBOJPEG";
+	case VDEC_DECODER_IMPLEM_QCOM:
+		return "QCOM";
 	default:
 		return "UNKNOWN";
 	}

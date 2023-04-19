@@ -61,6 +61,10 @@ static const struct vdec_ops *implem_ops(enum vdec_decoder_implem implem)
 	case VDEC_DECODER_IMPLEM_TURBOJPEG:
 		return &vdec_turbojpeg_ops;
 #endif
+#ifdef BUILD_LIBVIDEO_DECODE_QCOM
+	case VDEC_DECODER_IMPLEM_QCOM:
+		return &vdec_qcom_ops;
+#endif
 	default:
 		return NULL;
 	}
@@ -126,6 +130,14 @@ static int vdec_get_implem(enum vdec_decoder_implem *implem)
 		return 0;
 	}
 #endif /* BUILD_LIBVIDEO_DECODE_TURBOJPEG */
+
+#ifdef BUILD_LIBVIDEO_DECODE_QCOM
+	if ((*implem == VDEC_DECODER_IMPLEM_AUTO) ||
+	    (*implem == VDEC_DECODER_IMPLEM_QCOM)) {
+		*implem = VDEC_DECODER_IMPLEM_QCOM;
+		return 0;
+	}
+#endif /* BUILD_LIBVIDEO_DECODE_QCOM */
 
 	return -ENOSYS;
 }

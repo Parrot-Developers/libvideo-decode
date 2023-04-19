@@ -41,17 +41,19 @@ static void initialize_supported_formats(void)
 }
 
 
-static void flush_complete(struct vdec_videocoremmal *self)
+static void call_flush_done(void *userdata)
 {
-	/* Call the flush callback if defined */
+	struct vdec_videocoremmal *self = userdata;
+
 	if (self->base->cbs.flush)
 		self->base->cbs.flush(self->base, self->base->userdata);
 }
 
 
-static void stop_complete(struct vdec_videocoremmal *self)
+static void call_stop_done(void *userdata)
 {
-	/* Call the stop callback if defined */
+	struct vdec_videocoremmal *self = userdata;
+
 	if (self->base->cbs.stop)
 		self->base->cbs.stop(self->base, self->base->userdata);
 }
@@ -60,7 +62,7 @@ static void stop_complete(struct vdec_videocoremmal *self)
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct vdec_videocoremmal *self = userdata;
-	int ret;
+	int ret, err;
 	char message;
 
 	do {
@@ -74,10 +76,18 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 
 		switch (message) {
 		case VDEC_MSG_FLUSH:
-			flush_complete(self);
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_flush_done, self, self);
+			if (err < 0)
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
 			break;
 		case VDEC_MSG_STOP:
-			stop_complete(self);
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_stop_done, self, self);
+			if (err < 0)
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
 			break;
 		default:
 			ULOGE("unknown message: %c", message);
@@ -1281,6 +1291,11 @@ static int destroy(struct vdec_decoder *base)
 	if (self->mmal_out_queue)
 		mmal_queue_destroy(self->mmal_out_queue);
 	mmal_vc_deinit();
+
+	err = pomp_loop_idle_remove_by_cookie(base->loop, self);
+	if (err < 0)
+		ULOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
+
 	free(self);
 
 	return 0;

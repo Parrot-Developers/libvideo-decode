@@ -75,14 +75,18 @@ static void av_log_cb(void *avcl, int level, const char *fmt, va_list vl)
 }
 
 
-static void flush_complete(struct vdec_ffmpeg *self)
+static void call_flush_done(void *userdata)
 {
+	struct vdec_ffmpeg *self = userdata;
+
 	vdec_call_flush_cb(self->base);
 }
 
 
-static void stop_complete(struct vdec_ffmpeg *self)
+static void call_stop_done(void *userdata)
 {
+	struct vdec_ffmpeg *self = userdata;
+
 	vdec_call_stop_cb(self->base);
 }
 
@@ -90,7 +94,7 @@ static void stop_complete(struct vdec_ffmpeg *self)
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct vdec_ffmpeg *self = userdata;
-	int ret;
+	int ret, err;
 	char message;
 
 	do {
@@ -104,11 +108,19 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 
 		switch (message) {
 		case VDEC_MSG_FLUSH:
-			flush_complete(self);
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_flush_done, self, self);
+			if (err < 0)
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
 			break;
 		case VDEC_MSG_STOP:
-			stop_complete(self);
-			return;
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_stop_done, self, self);
+			if (err < 0)
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
+			break;
 		default:
 			ULOGE("unknown message: %c", message);
 			break;
@@ -1072,6 +1084,11 @@ static int destroy(struct vdec_decoder *base)
 		av_buffer_unref(&self->hw_device_ctx);
 	if (self->dummy_frame != NULL)
 		av_frame_free(&self->dummy_frame);
+
+	err = pomp_loop_idle_remove_by_cookie(base->loop, self);
+	if (err < 0)
+		ULOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
+
 	free(self);
 
 	return 0;

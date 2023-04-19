@@ -20,13 +20,14 @@ LOCAL_LIBRARIES := \
 LOCAL_CONFIG_FILES := config.in
 $(call load-config)
 LOCAL_CONDITIONAL_LIBRARIES := \
+	CONFIG_VDEC_AML:libvideo-decode-aml \
 	CONFIG_VDEC_FFMPEG:libvideo-decode-ffmpeg \
+	CONFIG_VDEC_HISI:libvideo-decode-hisi \
 	CONFIG_VDEC_MEDIACODEC:libvideo-decode-mediacodec \
+	CONFIG_VDEC_QCOM:libvideo-decode-qcom \
 	CONFIG_VDEC_TURBOJPEG:libvideo-decode-turbojpeg \
 	CONFIG_VDEC_VIDEOCOREMMAL:libvideo-decode-videocoremmal \
-	CONFIG_VDEC_VIDEOTOOLBOX:libvideo-decode-videotoolbox \
-	CONFIG_VDEC_HISI:libvideo-decode-hisi \
-	CONFIG_VDEC_AML:libvideo-decode-aml
+	CONFIG_VDEC_VIDEOTOOLBOX:libvideo-decode-videotoolbox
 LOCAL_EXPORT_LDLIBS := -lvideo-decode-core
 ifeq ("$(TARGET_OS)","windows")
   LOCAL_LDLIBS += -lws2_32

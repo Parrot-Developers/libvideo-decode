@@ -116,6 +116,9 @@ enum vdec_decoder_implem {
 	/* TurboJPEG decoder implementation */
 	VDEC_DECODER_IMPLEM_TURBOJPEG,
 
+	/* Qualcomm decoder implementation */
+	VDEC_DECODER_IMPLEM_QCOM,
+
 	/* End of supported implementation */
 	VDEC_DECODER_IMPLEM_MAX,
 };
