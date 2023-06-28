@@ -46,6 +46,19 @@ extern "C" {
 #	define VDEC_API
 #endif /* !VDEC_API_EXPORTS */
 
+
+struct vdec_config_turbojpeg {
+	/* Encoder implementation for this extension.
+	 * Keep this field for compatibility with 'struct venc_config_impl' */
+	enum vdec_decoder_implem implem;
+
+	/* Optional output memory pool,
+	 * If set, the decoder will get a mbuf_mem from this pool and fill it
+	 * with the decoded image to avoid memory copies */
+	struct mbuf_pool *out_pool;
+};
+
+
 extern VDEC_API const struct vdec_ops vdec_turbojpeg_ops;
 
 #ifdef __cplusplus

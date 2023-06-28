@@ -142,6 +142,7 @@ static int decode_frame(struct vdec_turbojpeg *self,
 	size_t offset = 0;
 	void *mem_data = NULL;
 	size_t mem_data_size = 0;
+	size_t conv_mem_size = 0;
 	unsigned int i;
 
 	if (!in_frame)
@@ -174,7 +175,7 @@ static int decode_frame(struct vdec_turbojpeg *self,
 		goto out;
 	}
 
-	/* Get a mem from the pool */
+	/* Get a memory from the pool */
 	ret = mbuf_pool_get(self->out_pool, &out_mem);
 	if (ret < 0) {
 		ULOG_ERRNO("mbuf_pool_get", -ret);
@@ -208,6 +209,24 @@ static int decode_frame(struct vdec_turbojpeg *self,
 		offset += plane_size[i];
 	}
 
+	if (vdef_raw_format_cmp(&self->base->config.preferred_output_format,
+				&vdef_nv12)) {
+		/* As libjpeg-turbo does not support NV12 output format,
+		 * A temporary memory is used to hold U and V planes.
+		 * Y plane will be stored in the output buffer
+		 *     (no conversion needed)
+		 * U plane will be stored in the conv_mem,
+		 * V plane will be stored in the conv_mem + U plane offset
+		 * */
+		ret = mbuf_mem_get_data(
+			self->conv_mem, (void *)&plane_data[1], &conv_mem_size);
+		if (ret < 0) {
+			ULOG_ERRNO("mbuf_mem_get_data", -ret);
+			goto out;
+		}
+		plane_data[2] = plane_data[1] + (plane_size[1] / 2);
+	}
+
 	ret = mbuf_coded_video_frame_add_ancillary_buffer(
 		in_frame,
 		VDEC_ANCILLARY_KEY_DEQUEUE_TIME,
@@ -230,6 +249,29 @@ static int decode_frame(struct vdec_turbojpeg *self,
 		goto out;
 	}
 
+	if (vdef_raw_format_cmp(&self->base->config.preferred_output_format,
+				&vdef_nv12)) {
+		/* Y plane does not need conversion,
+		 * U and V planes are merged into the output buffer
+		 *     (+ Y plane offset)
+		 * using libyuv hardware-accelerated conversion function.
+		 */
+		ret = I420ToNV12(NULL,
+				 self->base->video_info.resolution.width,
+				 plane_data[1],
+				 self->base->video_info.resolution.width / 2,
+				 plane_data[2],
+				 self->base->video_info.resolution.width / 2,
+				 NULL,
+				 self->base->video_info.resolution.width,
+				 plane_data[0] + plane_size[0],
+				 self->base->video_info.resolution.width,
+				 self->base->video_info.resolution.width,
+				 self->base->video_info.resolution.height);
+		if (ret < 0)
+			ULOG_ERRNO("I420ToNV12", -ret);
+	}
+
 	ret = mbuf_coded_video_frame_release_packed_buffer(in_frame, in_data);
 	if (ret < 0) {
 		ULOG_ERRNO("mbuf_coded_video_frame_release_packed_buffer",
@@ -244,6 +286,11 @@ static int decode_frame(struct vdec_turbojpeg *self,
 		out_info.plane_stride[0] = stride;
 		out_info.plane_stride[1] = stride / 2;
 		out_info.plane_stride[2] = stride / 2;
+	} else if (vdef_raw_format_cmp(&out_info.format, &vdef_nv12)) {
+		unsigned int stride = self->base->video_info.resolution.width;
+		out_info.plane_stride[0] = stride;
+		out_info.plane_stride[1] = stride;
+		out_info.plane_stride[2] = 0;
 	} else {
 		ret = -ENOSYS;
 		ULOG_ERRNO("unsupported output chroma format", -ret);
@@ -624,10 +671,15 @@ static int destroy(struct vdec_decoder *base)
 			ULOG_ERRNO("mbuf_raw_video_frame_queue_destroy:dec_out",
 				   -err);
 	}
-	if (self->out_pool != NULL) {
+	if (self->out_pool != NULL && !self->external_out_pool) {
 		err = mbuf_pool_destroy(self->out_pool);
 		if (err < 0)
 			ULOG_ERRNO("mbuf_pool_destroy:dec_out", -err);
+	}
+	if (self->conv_mem != NULL) {
+		err = mbuf_mem_unref(self->conv_mem);
+		if (err < 0)
+			ULOG_ERRNO("mbuf_mem_unref", -err);
 	}
 	if (self->mbox) {
 		err = pomp_loop_remove(base->loop,
@@ -693,6 +745,7 @@ static int create(struct vdec_decoder *base)
 {
 	int ret = 0;
 	struct vdec_turbojpeg *self = NULL;
+	struct vdec_config_turbojpeg *specific;
 	struct mbuf_coded_video_frame_queue_args queue_args = {
 		.filter = input_filter,
 	};
@@ -713,7 +766,9 @@ static int create(struct vdec_decoder *base)
 
 	if (vdef_is_raw_format_valid(&base->config.preferred_output_format) &&
 	    !vdef_raw_format_cmp(&base->config.preferred_output_format,
-				 &vdef_i420)) {
+				 &vdef_i420) &&
+	    !vdef_raw_format_cmp(&base->config.preferred_output_format,
+				 &vdef_nv12)) {
 		ret = -EINVAL;
 		ULOG_ERRNO("invalid preferred_output_format", -ret);
 		goto error;
@@ -725,8 +780,10 @@ static int create(struct vdec_decoder *base)
 
 	self->base = base;
 	base->derived = self;
-	/* Output format is hardcoded as I420 */
-	self->output_format = vdef_i420;
+	if (vdef_is_raw_format_valid(&base->config.preferred_output_format))
+		self->output_format = base->config.preferred_output_format;
+	else
+		self->output_format = vdef_i420;
 	self->thread_launched = false;
 
 	queue_args.filter_userdata = self;
@@ -737,6 +794,14 @@ static int create(struct vdec_decoder *base)
 	if (!self->tj_handler) {
 		ULOGE("%s", tjGetErrorStr());
 		goto error;
+	}
+
+	specific = (struct vdec_config_turbojpeg *)vdec_config_get_specific(
+		&base->config, VDEC_DECODER_IMPLEM_TURBOJPEG);
+
+	if (specific && specific->out_pool) {
+		self->out_pool = specific->out_pool;
+		self->external_out_pool = true;
 	}
 
 	/* Initialize the mailbox for inter-thread messages  */
@@ -872,17 +937,32 @@ static int set_jpeg_params(struct vdec_decoder *base)
 		pool_size += plane_size[i];
 	}
 
-	/* Create pool for raw output frames */
-	ret = mbuf_pool_new(mbuf_mem_generic_impl,
-			    pool_size,
-			    pool_count,
-			    MBUF_POOL_NO_GROW,
-			    0,
-			    "vdec_turbojpeg",
-			    &self->out_pool);
-	if (ret < 0) {
-		ULOG_ERRNO("mbuf_pool_new", -ret);
-		return ret;
+	/* Create pool for raw output frames, if needed */
+	if (self->out_pool == NULL) {
+		ret = mbuf_pool_new(mbuf_mem_generic_impl,
+				    pool_size,
+				    pool_count,
+				    MBUF_POOL_NO_GROW,
+				    0,
+				    "vdec_turbojpeg",
+				    &self->out_pool);
+		if (ret < 0) {
+			ULOG_ERRNO("mbuf_pool_new", -ret);
+			return ret;
+		}
+	}
+
+	/* Create an extra memory to merge UV planes, if needed */
+	if (vdef_raw_format_cmp(&self->base->config.preferred_output_format,
+				&vdef_nv12)) {
+		/* Memory size is total size minus Y plane size */
+		size_t capacity = pool_size - plane_size[0];
+
+		ret = mbuf_mem_generic_new(capacity, &self->conv_mem);
+		if (ret < 0) {
+			ULOG_ERRNO("mbuf_mem_generic_new", -ret);
+			return ret;
+		}
 	}
 
 	return 0;

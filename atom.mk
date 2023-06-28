@@ -12,8 +12,8 @@ LOCAL_SRC_FILES := \
 	src/vdec.c
 LOCAL_LIBRARIES := \
 	libh264 \
-	libpomp \
 	libh265 \
+	libpomp \
 	libulog \
 	libvideo-decode-core \
 	libvideo-defs
@@ -144,7 +144,8 @@ LOCAL_LIBRARIES := \
 	libulog \
 	libvideo-decode-core \
 	libvideo-defs \
-	libvideo-metadata
+	libvideo-metadata \
+	libyuv
 
 include $(BUILD_LIBRARY)
 

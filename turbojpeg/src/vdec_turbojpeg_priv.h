@@ -43,6 +43,8 @@
 #include <video-decode/vdec_internal.h>
 #include <video-decode/vdec_turbojpeg.h>
 
+#include <libyuv/convert_from.h>
+
 #include <turbojpeg.h>
 
 #define VDEC_MSG_FLUSH 'f'
@@ -64,6 +66,10 @@ struct vdec_turbojpeg {
 	struct mbuf_raw_video_frame_queue *dec_out_queue;
 	struct pomp_evt *dec_out_queue_evt;
 	struct mbuf_pool *out_pool;
+	/* Specific: indicate that out_pool is external */
+	bool external_out_pool;
+	/* I420 to NV12 conversion memory for UV planes */
+	struct mbuf_mem *conv_mem;
 
 	tjhandle tj_handler;
 
