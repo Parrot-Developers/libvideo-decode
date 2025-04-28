@@ -51,6 +51,20 @@ extern "C" {
 
 
 /**
+ * Get the supported input buffer data formats for all decoder implementations.
+ * The returned formats array is a static array whose size is the return value
+ * of this function. If this function returns an error (negative errno value),
+ * then the value of *formats is undefined.
+ * The vdec_get_auto_implem_by_coded_format function can then be used to find
+ * a suitable implementation for a given format.
+ * @param formats: pointer to the supported formats list (output)
+ * @return the size of the formats array, or a negative errno on error.
+ */
+VDEC_API int
+vdec_get_all_supported_input_formats(const struct vdef_coded_format **formats);
+
+
+/**
  * Get the supported input buffer data formats for the given
  * decoder implementation.
  * Each implementation supports at least one input format,

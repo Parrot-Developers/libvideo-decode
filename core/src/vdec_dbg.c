@@ -113,7 +113,7 @@ void vdec_dbg_h264_slice(struct vdec_decoder *self,
 		nh.nal_ref_idc,
 		sh->frame_num,
 		sh->pic_order_cnt_lsb,
-		sh->slice_type,
+		H264_SLICE_TYPE(sh->slice_type),
 		sh->first_mb_in_slice);
 }
 

@@ -45,14 +45,7 @@ extern "C" {
 #endif /* !VDEC_API_EXPORTS */
 
 
-struct vdec_config_mediacodec {
-	/* Decoder implementation for this extension.
-	 * Keep this field for compatibility with 'struct vdec_config_impl' */
-	enum vdec_decoder_implem implem;
-
-	/* If true, slice headers will be rewritten with a fake frame_num */
-	bool fake_frame_num;
-};
+#define VDEC_MEDIACODEC_NB_SUPPORTED_FORMATS 2
 
 
 extern VDEC_API const struct vdec_ops vdec_mediacodec_ops;

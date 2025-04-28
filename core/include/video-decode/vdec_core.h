@@ -104,9 +104,6 @@ enum vdec_decoder_implem {
 	/* Apple VideoToolbox decoder implementation */
 	VDEC_DECODER_IMPLEM_VIDEOTOOLBOX,
 
-	/* Broadcom VideoCore MMAL decoder implementation */
-	VDEC_DECODER_IMPLEM_VIDEOCOREMMAL,
-
 	/* HiSilicon decoder implementation */
 	VDEC_DECODER_IMPLEM_HISI,
 
@@ -157,10 +154,13 @@ struct vdec_config {
 
 	/* Preferred decoding thread count (0 means no preference,
 	 * use the default value; 1 means no multi-threading;
-	 * only relevant for CPU decoding implementations) */
+	 * only relevant for CPU decoding implementations);
+	 * can be overriden by the VDEC_PREFERRED_THREAD_COUNT
+	 * environment variable */
 	unsigned int preferred_thread_count;
 
-	/* Favor low delay decoding (e.g. for a live stream) */
+	/* Favor low delay decoding (e.g. for a live stream);
+	 * can be overriden by the VDEC_LOW_DELAY environment variable */
 	int low_delay;
 
 	/* Generate an H.264 grey IDR frame for synchronization if needed */
@@ -171,10 +171,6 @@ struct vdec_config {
 
 	/* Preferred output buffers data format (optional, 0 means any) */
 	struct vdef_raw_format preferred_output_format;
-
-	/* Android Java VM pointer (only used on Android, set to
-	 * NULL otherwise) */
-	void *android_jvm;
 
 	/* Debug output directory */
 	const char *dbg_dir;

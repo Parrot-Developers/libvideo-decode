@@ -59,6 +59,9 @@ struct vdec_config_turbojpeg {
 };
 
 
+#define VDEC_TURBOJPEG_NB_SUPPORTED_FORMATS 1
+
+
 extern VDEC_API const struct vdec_ops vdec_turbojpeg_ops;
 
 #ifdef __cplusplus

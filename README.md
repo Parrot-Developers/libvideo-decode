@@ -1,7 +1,7 @@
 # libvideo-decode - Video decoding library
 
-_libvideo-decode_ is a C library to handle the decoding of H.264 video on
-various platforms with a common API.
+_libvideo-decode_ is a C library that provides a common API for decoding
+H.264, H.265 video and JPEG photos across various platforms.
 
 The library uses hardware-accelerated decoding when available.
 
@@ -9,11 +9,11 @@ The library uses hardware-accelerated decoding when available.
 
 The following implementations are available:
 
-* FFmpeg (CPU or cuvid acceleration on Nvidia GPU if available)
+* FFmpeg (CPU or CUSA acceleration on Nvidia GPU if available)
 * MediaCodec on Android 4.2+ (through the NDK API on Android 5.0+
 or the Java API through JNI)
+* TurboJPEG using libjpeg-turbo
 * VideoToolbox on iOS 8+ and MacOS X
-* MMAL on Broadcom VideoCore IV (Raspberry Pi platforms)
 
 The application can force using a specific implementation or let the library
 decide according to what is supported by the platform.
@@ -22,13 +22,20 @@ decide according to what is supported by the platform.
 
 The library depends on the following Alchemy modules:
 
-* libulog
 * libfutils
-* libvideo-buffers
 * libh264
+* libh265
+* libmedia-buffers
+* libmedia-buffers-memory
+* libmedia-buffers-memory-generic
+* libpomp
+* libulog
+* libvideo-decode-core
+* libvideo-defs
+* libvideo-metadata
 * (optional) ffmpeg-libav (for FFmpeg support)
-* (optional) libvideo-buffers-generic (for FFmpeg support)
-* (optional) mmal (for Broadcom VideoCore IV)
+* (optional) libjpeg-turbo (for TurboJPEG support)
+* (optional) libyuv (for TurboJPEG support)
 
 The library also depends on the following frameworks for iOS and MacOS only:
 
@@ -61,8 +68,8 @@ the _pomp_loop_ thread.
 ## Testing
 
 The library can be tested using the provided _vdec_ command-line tool which
-takes as input a raw H.264 (annex B byte stream) file and can optionally
-output a decoded YUV file.
+takes as input a raw H.264 or H.265 (Annex B byte stream) file and can
+optionally output a decoded YUV file. It also supports decoding JPEG images.
 
 To build the tool, enable _vdec_ in the Alchemy build configuration.
 

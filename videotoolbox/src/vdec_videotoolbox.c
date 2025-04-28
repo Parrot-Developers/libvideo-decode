@@ -32,8 +32,8 @@ ULOG_DECLARE_TAG(ULOG_TAG);
 #include "vdec_videotoolbox_priv.h"
 
 
-#define NB_SUPPORTED_FORMATS 2
-static struct vdef_coded_format supported_formats[NB_SUPPORTED_FORMATS];
+static struct vdef_coded_format
+	supported_formats[VDEC_VIDEOTOOLBOX_NB_SUPPORTED_FORMATS];
 static pthread_once_t supported_formats_is_init = PTHREAD_ONCE_INIT;
 static void initialize_supported_formats(void)
 {
@@ -42,15 +42,19 @@ static void initialize_supported_formats(void)
 }
 
 
+/* Called on the loop thread */
 static void call_flush_done(void *userdata)
 {
 	struct vdec_videotoolbox *self = userdata;
 
+	atomic_store(&self->flush_required, false);
+	atomic_store(&self->need_sync, true);
+
 	vdec_call_flush_cb(self->base);
-	self->need_sync = true;
 }
 
 
+/* Called on the loop thread */
 static void call_stop_done(void *userdata)
 {
 	struct vdec_videotoolbox *self = userdata;
@@ -59,12 +63,14 @@ static void call_stop_done(void *userdata)
 }
 
 
+/* Called on the loop thread */
 static void decoder_error(struct vdec_videotoolbox *self, int error)
 {
 	vdec_call_frame_output_cb(self->base, error, NULL);
 }
 
 
+/* Called on the loop thread */
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct vdec_videotoolbox *self = userdata;
@@ -76,7 +82,7 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 		ret = mbox_peek(self->mbox, &message);
 		if (ret < 0) {
 			if (ret != -EAGAIN)
-				ULOG_ERRNO("mbox_peek", -ret);
+				VDEC_LOG_ERRNO("mbox_peek", -ret);
 			break;
 		}
 
@@ -85,47 +91,51 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 			err = pomp_loop_idle_add_with_cookie(
 				self->base->loop, call_flush_done, self, self);
 			if (err < 0)
-				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
-					   -err);
+				VDEC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					       -err);
 			break;
 		case VDEC_VIDEOTOOLBOX_MESSAGE_TYPE_STOP:
 			err = pomp_loop_idle_add_with_cookie(
 				self->base->loop, call_stop_done, self, self);
 			if (err < 0)
-				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
-					   -err);
+				VDEC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					       -err);
 			break;
 		case VDEC_VIDEOTOOLBOX_MESSAGE_TYPE_ERROR:
 			decoder_error(self, message.error);
 			break;
 		default:
-			ULOGE("unknown message type: %d", message.type);
+			VDEC_LOGE("unknown message type: %d", message.type);
 			break;
 		}
 	} while (ret == 0);
 }
 
 
+/* Called on the loop thread */
 static void out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 {
+	int ret, err;
 	struct vdec_videotoolbox *self = userdata;
 	struct mbuf_raw_video_frame *frame;
-	int ret;
 
 	do {
 		ret = mbuf_raw_video_frame_queue_pop(self->out_queue, &frame);
 		if (ret == -EAGAIN) {
 			return;
 		} else if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_pop", -ret);
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_queue_pop", -ret);
 			return;
 		}
 		vdec_call_frame_output_cb(self->base, 0, frame);
-		mbuf_raw_video_frame_unref(frame);
+		err = mbuf_raw_video_frame_unref(frame);
+		if (err < 0)
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_unref", -err);
 	} while (ret == 0);
 }
 
 
+/* Called on the loop thread */
 static CFDataRef vdec_videotoolbox_avcc_create(const uint8_t *sps,
 					       size_t sps_size,
 					       const uint8_t *pps,
@@ -166,6 +176,7 @@ static CFDataRef vdec_videotoolbox_avcc_create(const uint8_t *sps,
 }
 
 
+/* Called on the loop thread */
 static CFDataRef vdec_videotoolbox_hvcc_create(const uint8_t *vps,
 					       size_t vps_size,
 					       const uint8_t *sps,
@@ -265,6 +276,7 @@ static CFDataRef vdec_videotoolbox_hvcc_create(const uint8_t *vps,
 }
 
 
+/* Called on the loop thread */
 static CFMutableDictionaryRef
 vdec_videotoolbox_decoder_config_create(const uint8_t *vps,
 					size_t vps_size,
@@ -348,6 +360,7 @@ out:
 }
 
 
+/* Called on the loop thread */
 static CFMutableDictionaryRef
 vdec_videotoolbox_buffer_attr_create(unsigned int width,
 				     unsigned int height,
@@ -439,6 +452,7 @@ out:
 }
 
 
+/* Called on the decoder thread */
 static int vdec_videotoolbox_do_flush(struct vdec_videotoolbox *self)
 {
 	int ret;
@@ -448,12 +462,14 @@ static int vdec_videotoolbox_do_flush(struct vdec_videotoolbox *self)
 		/* Flush the queues */
 		ret = mbuf_coded_video_frame_queue_flush(self->in_queue);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_queue_flush", -ret);
+			VDEC_LOG_ERRNO("mbuf_coded_video_frame_queue_flush",
+				       -ret);
 			return ret;
 		}
 		ret = mbuf_raw_video_frame_queue_flush(self->out_queue);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_flush", -ret);
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_queue_flush",
+				       -ret);
 			return ret;
 		}
 	}
@@ -465,7 +481,7 @@ static int vdec_videotoolbox_do_flush(struct vdec_videotoolbox *self)
 			self->decompress_ref);
 		if (osstatus != noErr && osstatus != kVTInvalidSessionErr) {
 			ret = -EPROTO;
-			ULOG_ERRNO(
+			VDEC_LOG_ERRNO(
 				"VTDecompressionSessionWaitFor"
 				"AsynchronousFrames status=%d",
 				-ret,
@@ -481,7 +497,7 @@ static int vdec_videotoolbox_do_flush(struct vdec_videotoolbox *self)
 	};
 	ret = mbox_push(self->mbox, &message);
 	if (ret < 0)
-		ULOG_ERRNO("mbox_push", -ret);
+		VDEC_LOG_ERRNO("mbox_push", -ret);
 
 	atomic_store(&self->flush, false);
 
@@ -489,6 +505,7 @@ static int vdec_videotoolbox_do_flush(struct vdec_videotoolbox *self)
 }
 
 
+/* Can be called on any thread */
 static void
 vdec_videotoolbox_cvpb_mbuf_release(void *data, size_t len, void *userdata)
 {
@@ -499,13 +516,14 @@ vdec_videotoolbox_cvpb_mbuf_release(void *data, size_t len, void *userdata)
 }
 
 
+/* Called on the decoder thread */
 static int
 vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 				     struct mbuf_coded_video_frame *in_frame,
 				     struct mbuf_raw_video_frame **out_frame,
 				     CVPixelBufferRef pixel_buffer_ref)
 {
-	int ret = 0;
+	int ret = 0, err;
 	struct timespec cur_ts = {0, 0};
 	uint64_t ts_us;
 	OSType pixel_format;
@@ -520,7 +538,7 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 
 	ret = mbuf_coded_video_frame_get_frame_info(in_frame, &in_info);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_get_frame_info", -ret);
+		VDEC_LOG_ERRNO("mbuf_coded_video_frame_get_frame_info", -ret);
 		goto out;
 	}
 
@@ -547,7 +565,7 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 		break;
 	default:
 		ret = -ENOSYS;
-		ULOG_ERRNO("unsupported output format", -ret);
+		VDEC_LOG_ERRNO("unsupported output format", -ret);
 		goto out;
 	}
 	out_info.info.bit_depth = self->base->video_info.bit_depth;
@@ -562,7 +580,7 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 
 	ret = mbuf_raw_video_frame_new(&out_info, out_frame);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_new", -ret);
+		VDEC_LOG_ERRNO("mbuf_raw_video_frame_new", -ret);
 		goto out;
 	}
 
@@ -571,8 +589,8 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 		mbuf_raw_video_frame_ancillary_data_copier,
 		*out_frame);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_foreach_ancillary_data",
-			   -ret);
+		VDEC_LOG_ERRNO("mbuf_coded_video_frame_foreach_ancillary_data",
+			       -ret);
 		goto out;
 	}
 
@@ -590,7 +608,7 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 				    ref,
 				    &out_mem);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_mem_generic_wrap", -ret);
+		VDEC_LOG_ERRNO("mbuf_mem_generic_wrap", -ret);
 		goto out;
 	}
 
@@ -598,14 +616,14 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 	if (ret == 0) {
 		ret = mbuf_raw_video_frame_set_metadata(*out_frame, metadata);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_set_metadata", -ret);
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_set_metadata",
+				       -ret);
 			goto out;
 		}
 	} else if (ret == -ENOENT) {
-		ret = 0;
 		/* No metadata, nothing to do */
 	} else {
-		ULOG_ERRNO("mbuf_coded_video_frame_get_metadata", -ret);
+		VDEC_LOG_ERRNO("mbuf_coded_video_frame_get_metadata", -ret);
 		goto out;
 	}
 
@@ -622,7 +640,8 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 			out_info.plane_stride[0] *
 				out_info.info.resolution.height);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_set_plane[0]", -ret);
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_set_plane[0]",
+				       -ret);
 			goto out;
 		}
 		plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer_ref, 1);
@@ -634,7 +653,8 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 			out_info.plane_stride[1] *
 				out_info.info.resolution.height / 2);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_set_plane[1]", -ret);
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_set_plane[1]",
+				       -ret);
 			goto out;
 		}
 		plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer_ref, 2);
@@ -646,7 +666,8 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 			out_info.plane_stride[2] *
 				out_info.info.resolution.height / 2);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_set_plane[2]", -ret);
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_set_plane[2]",
+				       -ret);
 			goto out;
 		}
 		break;
@@ -661,7 +682,8 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 			out_info.plane_stride[0] *
 				out_info.info.resolution.height);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_set_plane[0]", -ret);
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_set_plane[0]",
+				       -ret);
 			goto out;
 		}
 		plane = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer_ref, 1);
@@ -673,13 +695,14 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 			out_info.plane_stride[1] *
 				out_info.info.resolution.height / 2);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_set_plane[1]", -ret);
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_set_plane[1]",
+				       -ret);
 			goto out;
 		}
 		break;
 	default:
 		ret = -ENOSYS;
-		ULOG_ERRNO("unsupported output format", -ret);
+		VDEC_LOG_ERRNO("unsupported output format", -ret);
 		goto out;
 	}
 
@@ -692,27 +715,37 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 		&ts_us,
 		sizeof(ts_us));
 	if (ret < 0)
-		ULOG_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer", -ret);
+		VDEC_LOG_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer",
+			       -ret);
 
 out:
 	if (ret < 0 && *out_frame) {
-		mbuf_raw_video_frame_unref(*out_frame);
+		err = mbuf_raw_video_frame_unref(*out_frame);
+		if (err < 0)
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_unref", -err);
 		*out_frame = NULL;
 	}
-	if (out_mem)
-		mbuf_mem_unref(out_mem);
-	if (metadata)
-		vmeta_frame_unref(metadata);
+	if (out_mem) {
+		err = mbuf_mem_unref(out_mem);
+		if (err < 0)
+			VDEC_LOG_ERRNO("mbuf_mem_unref", -err);
+	}
+	if (metadata) {
+		err = vmeta_frame_unref(metadata);
+		if (err < 0)
+			VDEC_LOG_ERRNO("vmeta_frame_unref", -err);
+	}
 	return ret;
 }
 
 
+/* Called on the decoder thread */
 static int
 vdec_videotoolbox_insert_grey_idr(struct vdec_videotoolbox *self,
 				  struct vdef_coded_frame *in_frame_info,
 				  uint64_t *delta)
 {
-	int ret;
+	int ret, err;
 	struct mbuf_mem *idr_mem = NULL;
 	struct mbuf_coded_video_frame *idr_frame = NULL;
 	uint64_t timestamp;
@@ -728,16 +761,16 @@ vdec_videotoolbox_insert_grey_idr(struct vdec_videotoolbox *self,
 	VTDecodeFrameFlags decode_flags = 0;
 	VTDecodeInfoFlags info_flags = 0;
 
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(in_frame_info == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(delta == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(in_frame_info == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(delta == NULL, EINVAL);
 
 	/* Create buffer */
 	out_buf_size = self->base->video_info.resolution.width *
 		       self->base->video_info.resolution.height * 3 / 4;
 	ret = mbuf_mem_generic_new(out_buf_size, &idr_mem);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_mem_generic_new", -ret);
+		VDEC_LOG_ERRNO("mbuf_mem_generic_new", -ret);
 		goto out;
 	}
 
@@ -751,7 +784,7 @@ vdec_videotoolbox_insert_grey_idr(struct vdec_videotoolbox *self,
 				       &idr_frame);
 
 	if (ret < 0) {
-		ULOG_ERRNO("vdec_h264_write_grey_idr", -ret);
+		VDEC_LOG_ERRNO("vdec_h264_write_grey_idr", -ret);
 		goto out;
 	}
 
@@ -759,7 +792,8 @@ vdec_videotoolbox_insert_grey_idr(struct vdec_videotoolbox *self,
 	ret = mbuf_coded_video_frame_get_packed_buffer(
 		idr_frame, &frame_data, &frame_len);
 	if (ret != 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_get_packed_buffer", -ret);
+		VDEC_LOG_ERRNO("mbuf_coded_video_frame_get_packed_buffer",
+			       -ret);
 		goto out;
 	}
 
@@ -780,9 +814,9 @@ vdec_videotoolbox_insert_grey_idr(struct vdec_videotoolbox *self,
 						      &block_buffer_ref);
 	if (osstatus != noErr) {
 		ret = -EPROTO;
-		ULOG_ERRNO("CMBlockBufferCreateWithMemoryBlock status=%d",
-			   -ret,
-			   (int)osstatus);
+		VDEC_LOG_ERRNO("CMBlockBufferCreateWithMemoryBlock status=%d",
+			       -ret,
+			       (int)osstatus);
 		goto out;
 	}
 
@@ -800,7 +834,7 @@ vdec_videotoolbox_insert_grey_idr(struct vdec_videotoolbox *self,
 					&sample_buffer_ref);
 	if (osstatus != noErr) {
 		ret = -EPROTO;
-		ULOG_ERRNO(
+		VDEC_LOG_ERRNO(
 			"CMSampleBufferCreate status=%d", -ret, (int)osstatus);
 		goto out;
 	}
@@ -820,34 +854,49 @@ vdec_videotoolbox_insert_grey_idr(struct vdec_videotoolbox *self,
 						     &info_flags);
 	if (osstatus != noErr) {
 		ret = -EPROTO;
-		ULOG_ERRNO("VTDecompressionSessionDecodeFrame status=%d",
-			   -ret,
-			   (int)osstatus);
+		VDEC_LOG_ERRNO("VTDecompressionSessionDecodeFrame status=%d",
+			       -ret,
+			       (int)osstatus);
 		goto out;
 	}
 
+	atomic_fetch_add(&self->base->counters.pushed, 1);
+
 out:
-	if (idr_mem)
-		mbuf_mem_unref(idr_mem);
+	if (idr_mem) {
+		err = mbuf_mem_unref(idr_mem);
+		if (err < 0)
+			VDEC_LOG_ERRNO("mbuf_mem_unref", -err);
+	}
 	if (block_buffer_ref != NULL)
 		CFRelease(block_buffer_ref);
 	if (sample_buffer_ref != NULL)
 		CFRelease(sample_buffer_ref);
-	if (ret != 0 && frame_data)
-		mbuf_coded_video_frame_release_packed_buffer(idr_frame,
-							     frame_data);
-	if (ret != 0 && idr_frame)
-		mbuf_coded_video_frame_unref(idr_frame);
+	if (ret != 0 && frame_data) {
+		err = mbuf_coded_video_frame_release_packed_buffer(idr_frame,
+								   frame_data);
+		if (err < 0) {
+			VDEC_LOG_ERRNO(
+				"mbuf_coded_video_frame_release_packed_buffer",
+				-err);
+		}
+	}
+	if (ret != 0 && idr_frame) {
+		err = mbuf_coded_video_frame_unref(idr_frame);
+		if (err < 0)
+			VDEC_LOG_ERRNO("mbuf_coded_video_frame_unref", -err);
+	}
 
 	return ret;
 }
 
 
+/* Called on the decoder thread */
 static int
 vdec_videotoolbox_buffer_push_one(struct vdec_videotoolbox *self,
 				  struct mbuf_coded_video_frame *in_frame)
 {
-	int ret = 0;
+	int ret = 0, err;
 	struct vdef_coded_frame in_info;
 	struct timespec cur_ts = {0, 0};
 	uint64_t delta = 0;
@@ -865,7 +914,7 @@ vdec_videotoolbox_buffer_push_one(struct vdec_videotoolbox *self,
 
 	ret = mbuf_coded_video_frame_get_frame_info(in_frame, &in_info);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_get_frame_info", -ret);
+		VDEC_LOG_ERRNO("mbuf_coded_video_frame_get_frame_info", -ret);
 		goto out;
 	}
 
@@ -878,35 +927,40 @@ vdec_videotoolbox_buffer_push_one(struct vdec_videotoolbox *self,
 		&ts_us,
 		sizeof(ts_us));
 	if (ret != 0)
-		ULOG_ERRNO("mbuf_coded_video_frame_add_ancillary_buffer", -ret);
+		VDEC_LOG_ERRNO("mbuf_coded_video_frame_add_ancillary_buffer",
+			       -ret);
 
 	/* Discard the frame if the decoder is not configured */
 	if (!self->base->configured) {
-		mbuf_coded_video_frame_unref(in_frame);
+		err = mbuf_coded_video_frame_unref(in_frame);
+		if (err < 0)
+			VDEC_LOG_ERRNO("mbuf_coded_video_frame_unref", -err);
 		return 0;
 	}
 
-	if (self->need_sync) {
+	if (atomic_load(&self->need_sync)) {
 		if (vdec_is_sync_frame(in_frame, &in_info)) {
-			ULOGI("frame is a sync point");
-			self->need_sync = false;
+			VDEC_LOGI("frame is a sync point");
+			atomic_store(&self->need_sync, false);
 		} else {
 			if (self->base->config.encoding == VDEF_ENCODING_H264 &&
 			    self->base->config.gen_grey_idr) {
-				ULOGI("frame is not an IDR, "
-				      "generating grey IDR");
+				VDEC_LOGI(
+					"frame is not an IDR, "
+					"generating grey IDR");
 				ret = vdec_videotoolbox_insert_grey_idr(
 					self, &in_info, &delta);
 				if (ret < 0) {
-					ULOG_ERRNO(
+					VDEC_LOG_ERRNO(
 						"vdec_videotoolbox_insert_grey_idr",
 						-ret);
 					goto out;
 				}
-				self->need_sync = false;
+				atomic_store(&self->need_sync, false);
 			} else {
-				ULOGI("frame is not a sync point, "
-				      "discarding frame");
+				VDEC_LOGI(
+					"frame is not a sync point, "
+					"discarding frame");
 				goto out;
 			}
 		}
@@ -917,12 +971,12 @@ vdec_videotoolbox_buffer_push_one(struct vdec_videotoolbox *self,
 		int dbgret = vdec_dbg_write_frame(self->base->dbg.input_bs,
 						  in_frame);
 		if (dbgret < 0)
-			ULOG_ERRNO("vdec_dbg_write_frame", -dbgret);
+			VDEC_LOG_ERRNO("vdec_dbg_write_frame", -dbgret);
 	}
 	if (self->base->dbg.analysis != NULL) {
 		int dbgret = vdec_dbg_parse_frame(self->base, in_frame);
 		if (dbgret < 0)
-			ULOG_ERRNO("vdec_dbg_parse_frame", -dbgret);
+			VDEC_LOG_ERRNO("vdec_dbg_parse_frame", -dbgret);
 	}
 
 	/* Create the sample buffer */
@@ -935,7 +989,8 @@ vdec_videotoolbox_buffer_push_one(struct vdec_videotoolbox *self,
 	ret = mbuf_coded_video_frame_get_packed_buffer(
 		in_frame, &frame_data, &frame_len);
 	if (ret != 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_get_packed_buffer", -ret);
+		VDEC_LOG_ERRNO("mbuf_coded_video_frame_get_packed_buffer",
+			       -ret);
 		goto out;
 	}
 
@@ -950,9 +1005,9 @@ vdec_videotoolbox_buffer_push_one(struct vdec_videotoolbox *self,
 						      &block_buffer_ref);
 	if (osstatus != noErr) {
 		ret = -EPROTO;
-		ULOG_ERRNO("CMBlockBufferCreateWithMemoryBlock status=%d",
-			   -ret,
-			   (int)osstatus);
+		VDEC_LOG_ERRNO("CMBlockBufferCreateWithMemoryBlock status=%d",
+			       -ret,
+			       (int)osstatus);
 		goto out;
 	}
 
@@ -970,7 +1025,7 @@ vdec_videotoolbox_buffer_push_one(struct vdec_videotoolbox *self,
 					&sample_buffer_ref);
 	if (osstatus != noErr) {
 		ret = -EPROTO;
-		ULOG_ERRNO(
+		VDEC_LOG_ERRNO(
 			"CMSampleBufferCreate status=%d", -ret, (int)osstatus);
 		goto out;
 	}
@@ -991,11 +1046,13 @@ vdec_videotoolbox_buffer_push_one(struct vdec_videotoolbox *self,
 						     &info_flags);
 	if (osstatus != noErr) {
 		ret = -EPROTO;
-		ULOG_ERRNO("VTDecompressionSessionDecodeFrame status=%d",
-			   -ret,
-			   (int)osstatus);
+		VDEC_LOG_ERRNO("VTDecompressionSessionDecodeFrame status=%d",
+			       -ret,
+			       (int)osstatus);
 		goto out;
 	}
+
+	atomic_fetch_add(&self->base->counters.pushed, 1);
 
 out:
 	if (block_buffer_ref != NULL)
@@ -1003,15 +1060,25 @@ out:
 	if (sample_buffer_ref != NULL)
 		CFRelease(sample_buffer_ref);
 	if (ret != 0) {
-		if (frame_data)
-			mbuf_coded_video_frame_release_packed_buffer(
+		if (frame_data) {
+			err = mbuf_coded_video_frame_release_packed_buffer(
 				in_frame, frame_data);
-		mbuf_coded_video_frame_unref(in_frame);
+			if (err < 0) {
+				VDEC_LOG_ERRNO(
+					"mbuf_coded_video_frame_"
+					"release_packed_buffer",
+					-err);
+			}
+		}
+		err = mbuf_coded_video_frame_unref(in_frame);
+		if (err < 0)
+			VDEC_LOG_ERRNO("mbuf_coded_video_frame_unref", -err);
 	}
 	return ret;
 }
 
 
+/* Can be called on any thread */
 static void vdec_videotoolbox_frame_output_cb(void *decompress_output_ref_con,
 					      void *source_frame_ref_con,
 					      OSStatus status,
@@ -1020,20 +1087,20 @@ static void vdec_videotoolbox_frame_output_cb(void *decompress_output_ref_con,
 					      CMTime presentation_timestamp,
 					      CMTime presentation_duration)
 {
-	int ret;
+	int ret, err;
 	struct vdec_videotoolbox *self =
 		(struct vdec_videotoolbox *)decompress_output_ref_con;
 	struct mbuf_coded_video_frame *in_frame = source_frame_ref_con;
 	struct vdef_coded_frame in_info;
 	struct mbuf_raw_video_frame *out_frame = NULL;
 
-	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
 
 	if (status == kVTVideoDecoderBadDataErr) {
 		ret = -EBADMSG;
-		ULOG_ERRNO("decoder error %d (bad data), resync required",
-			   -ret,
-			   (int)status);
+		VDEC_LOG_ERRNO("decoder error %d (bad data), resync required",
+			       -ret,
+			       (int)status);
 		/* Call the frame callback with an error on the loop */
 		struct vdec_videotoolbox_message message = {
 			.type = VDEC_VIDEOTOOLBOX_MESSAGE_TYPE_ERROR,
@@ -1041,35 +1108,48 @@ static void vdec_videotoolbox_frame_output_cb(void *decompress_output_ref_con,
 		};
 		ret = mbox_push(self->mbox, &message);
 		if (ret < 0)
-			ULOG_ERRNO("mbox_push", -ret);
+			VDEC_LOG_ERRNO("mbox_push", -ret);
 		goto out;
 	} else if (status != noErr) {
-		ULOG_ERRNO("decoder error %d", EPROTO, (int)status);
+		VDEC_LOG_ERRNO("decoder error %d", EPROTO, (int)status);
 		goto out;
 	}
 
-	ULOG_ERRNO_RETURN_IF(image_buffer == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(in_frame == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(in_frame == NULL, EINVAL);
 
-	if (!self->base->configured)
+	if (image_buffer == NULL) {
+		if (info_flags & kVTDecodeInfo_FrameDropped) {
+			VDEC_LOGI("frame dropped by the decoder");
+		} else {
+			ret = -EPROTO;
+			VDEC_LOG_ERRNO("invalid image_buffer", -ret);
+		}
 		goto out;
+	}
+
+	atomic_fetch_add(&self->base->counters.pulled, 1);
+
+	if (!self->base->configured) {
+		VDEC_LOGI("frame discarded (not configured)");
+		goto out;
+	}
 
 	/* Discard the buffer when flushing with frames discarding */
 	if (atomic_load(&self->flushing) && atomic_load(&self->flush_discard)) {
-		ULOGI("frame discarded (flushing)"); /* TODO: debug */
+		VDEC_LOGI("frame discarded (flushing)"); /* TODO: debug */
 		goto out;
 	}
 
 	ret = vdec_videotoolbox_set_frame_metadata(
 		self, in_frame, &out_frame, (CVPixelBufferRef)image_buffer);
 	if (ret < 0) {
-		ULOG_ERRNO("vdec_videotoolbox_set_frame_metadata", -ret);
+		VDEC_LOG_ERRNO("vdec_videotoolbox_set_frame_metadata", -ret);
 		goto out;
 	}
 
 	ret = mbuf_raw_video_frame_finalize(out_frame);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_finalize", -ret);
+		VDEC_LOG_ERRNO("mbuf_raw_video_frame_finalize", -ret);
 		goto out;
 	}
 
@@ -1077,25 +1157,25 @@ static void vdec_videotoolbox_frame_output_cb(void *decompress_output_ref_con,
 		int dbgret = vdec_dbg_write_yuv_frame(
 			self->base->dbg.output_yuv, out_frame);
 		if (dbgret < 0)
-			ULOG_ERRNO("vdec_dbg_write_yuv_frame", -dbgret);
+			VDEC_LOG_ERRNO("vdec_dbg_write_yuv_frame", -dbgret);
 	}
 
 	ret = mbuf_coded_video_frame_get_frame_info(in_frame, &in_info);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_get_frame_info:decoder",
-			   -ret);
+		VDEC_LOG_ERRNO("mbuf_coded_video_frame_get_frame_info:decoder",
+			       -ret);
 		goto out;
 	}
 
 	/* Push the frame (if not silent) */
 	if ((in_info.info.flags & VDEF_FRAME_FLAG_SILENT) &&
 	    (!self->base->config.output_silent_frames)) {
-		ULOGD("silent frame (ignored)");
+		VDEC_LOGD("silent frame (ignored)");
 	} else {
 		ret = mbuf_raw_video_frame_queue_push(self->out_queue,
 						      out_frame);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_push", -ret);
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_queue_push", -ret);
 			goto out;
 		}
 	}
@@ -1110,18 +1190,36 @@ out:
 		size_t frame_len;
 		if (mbuf_coded_video_frame_get_packed_buffer(
 			    in_frame, &frame_data, &frame_len) == 0) {
-			mbuf_coded_video_frame_release_packed_buffer(
+			err = mbuf_coded_video_frame_release_packed_buffer(
 				in_frame, frame_data);
-			mbuf_coded_video_frame_release_packed_buffer(
+			if (err < 0) {
+				VDEC_LOG_ERRNO(
+					"mbuf_coded_video_frame_"
+					"release_packed_buffer",
+					-err);
+			}
+			err = mbuf_coded_video_frame_release_packed_buffer(
 				in_frame, frame_data);
+			if (err < 0) {
+				VDEC_LOG_ERRNO(
+					"mbuf_coded_video_frame_"
+					"release_packed_buffer",
+					-err);
+			}
 		}
-		mbuf_coded_video_frame_unref(in_frame);
+		err = mbuf_coded_video_frame_unref(in_frame);
+		if (err < 0)
+			VDEC_LOG_ERRNO("mbuf_coded_video_frame_unref", -err);
 	}
-	if (out_frame != NULL)
-		mbuf_raw_video_frame_unref(out_frame);
+	if (out_frame != NULL) {
+		err = mbuf_raw_video_frame_unref(out_frame);
+		if (err < 0)
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_unref", -err);
+	}
 }
 
 
+/* Called on the decoder thread */
 static void input_event_cb(struct pomp_evt *evt, void *userdata)
 {
 	int ret;
@@ -1130,26 +1228,42 @@ static void input_event_cb(struct pomp_evt *evt, void *userdata)
 
 	ret = mbuf_coded_video_frame_queue_pop(self->in_queue, &frame);
 	while (ret == 0) {
+		/* Flush discarding all frames */
+		if (atomic_load(&self->flush) &&
+		    atomic_load(&self->flush_discard)) {
+			int err = mbuf_coded_video_frame_unref(frame);
+			if (err < 0)
+				VDEC_LOG_ERRNO("mbuf_coded_video_frame_unref",
+					       -err);
+			goto flush;
+		}
 		/* Push the input frame */
 		ret = vdec_videotoolbox_buffer_push_one(self, frame);
 		if (ret < 0) {
-			ULOG_ERRNO("vdec_videotoolbox_buffer_push_one", -ret);
+			VDEC_LOG_ERRNO("vdec_videotoolbox_buffer_push_one",
+				       -ret);
 			ret = 0;
 			break;
 		}
 		ret = mbuf_coded_video_frame_queue_pop(self->in_queue, &frame);
 	}
 	if (ret != -EAGAIN)
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_pop", -ret);
+		VDEC_LOG_ERRNO("mbuf_coded_video_frame_queue_pop", -ret);
 	if (atomic_load(&self->flush) && ret == -EAGAIN) {
 		/* Flush without discarding frames */
-		ret = vdec_videotoolbox_do_flush(self);
-		if (ret < 0)
-			ULOG_ERRNO("vdec_videotoolbox_do_flush", -ret);
+		goto flush;
 	}
+
+	return;
+
+flush:
+	ret = vdec_videotoolbox_do_flush(self);
+	if (ret < 0)
+		VDEC_LOG_ERRNO("vdec_videotoolbox_do_flush", -ret);
 }
 
 
+/* Decoder thread */
 static void *vdec_videotoolbox_decoder_thread(void *ptr)
 {
 	int ret;
@@ -1158,30 +1272,38 @@ static void *vdec_videotoolbox_decoder_thread(void *ptr)
 	struct pomp_evt *in_queue_evt = NULL;
 	int timeout;
 
+#if !TARGET_OS_IPHONE
+	ret = pthread_setname_np("vdec_vtoolbox");
+	if (ret != 0)
+		VDEC_LOG_ERRNO("pthread_setname_np", ret);
+#endif
+
 	switch (self->base->config.encoding) {
 	case VDEF_ENCODING_H264:
 		if (__builtin_available(iOS 11.0, macOS 10.13, tvos 11.0, *)) {
-			ULOGI("Apple VideoToolbox H.264 decoding - "
-			      "hardware acceleration %s supported",
-			      VTIsHardwareDecodeSupported(
-				      kCMVideoCodecType_H264)
-				      ? "is"
-				      : "is not");
+			VDEC_LOGI(
+				"Apple VideoToolbox H.264 decoding - "
+				"hardware acceleration %s supported",
+				VTIsHardwareDecodeSupported(
+					kCMVideoCodecType_H264)
+					? "is"
+					: "is not");
 		} else {
-			ULOGI("Apple VideoToolbox H.264 decoding");
+			VDEC_LOGI("Apple VideoToolbox H.264 decoding");
 		}
 		break;
 
 	case VDEF_ENCODING_H265:
 		if (__builtin_available(iOS 11.0, macOS 10.13, tvos 11.0, *)) {
-			ULOGI("Apple VideoToolbox H.265 decoding - "
-			      "hardware acceleration %s supported",
-			      VTIsHardwareDecodeSupported(
-				      kCMVideoCodecType_HEVC)
-				      ? "is"
-				      : "is not");
+			VDEC_LOGI(
+				"Apple VideoToolbox H.265 decoding - "
+				"hardware acceleration %s supported",
+				VTIsHardwareDecodeSupported(
+					kCMVideoCodecType_HEVC)
+					? "is"
+					: "is not");
 		} else {
-			ULOGI("Apple VideoToolbox H.265 decoding");
+			VDEC_LOGI("Apple VideoToolbox H.265 decoding");
 		}
 		break;
 	default:
@@ -1190,18 +1312,18 @@ static void *vdec_videotoolbox_decoder_thread(void *ptr)
 
 	loop = pomp_loop_new();
 	if (!loop) {
-		ULOG_ERRNO("pomp_loop_new", ENOMEM);
+		VDEC_LOG_ERRNO("pomp_loop_new", ENOMEM);
 		goto exit;
 	}
 	ret = mbuf_coded_video_frame_queue_get_event(self->in_queue,
 						     &in_queue_evt);
 	if (ret != 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_get_event", -ret);
+		VDEC_LOG_ERRNO("mbuf_coded_video_frame_queue_get_event", -ret);
 		goto exit;
 	}
 	ret = pomp_evt_attach_to_loop(in_queue_evt, loop, input_event_cb, self);
 	if (ret != 0) {
-		ULOG_ERRNO("pomp_evt_attach_to_loop", -ret);
+		VDEC_LOG_ERRNO("pomp_evt_attach_to_loop", -ret);
 		goto exit;
 	}
 
@@ -1211,7 +1333,8 @@ static void *vdec_videotoolbox_decoder_thread(void *ptr)
 		    atomic_load(&self->flush_discard)) {
 			ret = vdec_videotoolbox_do_flush(self);
 			if (ret < 0)
-				ULOG_ERRNO("vdec_videotoolbox_do_flush", -ret);
+				VDEC_LOG_ERRNO("vdec_videotoolbox_do_flush",
+					       -ret);
 			continue;
 		}
 
@@ -1222,7 +1345,7 @@ static void *vdec_videotoolbox_decoder_thread(void *ptr)
 
 		ret = pomp_loop_wait_and_process(loop, timeout);
 		if (ret < 0 && ret != -ETIMEDOUT) {
-			ULOG_ERRNO("pomp_loop_wait_and_process", -ret);
+			VDEC_LOG_ERRNO("pomp_loop_wait_and_process", -ret);
 			if (!atomic_load(&self->should_stop)) {
 				/* Avoid looping on errors */
 				usleep(5000);
@@ -1237,39 +1360,40 @@ static void *vdec_videotoolbox_decoder_thread(void *ptr)
 	};
 	ret = mbox_push(self->mbox, &message);
 	if (ret < 0)
-		ULOG_ERRNO("mbox_push", -ret);
+		VDEC_LOG_ERRNO("mbox_push", -ret);
 
 exit:
 	if (in_queue_evt != NULL) {
 		ret = pomp_evt_detach_from_loop(in_queue_evt, loop);
 		if (ret != 0)
-			ULOG_ERRNO("pomp_evt_detach_from_loop", -ret);
+			VDEC_LOG_ERRNO("pomp_evt_detach_from_loop", -ret);
 	}
 	if (loop != NULL) {
 		ret = pomp_loop_destroy(loop);
 		if (ret != 0)
-			ULOG_ERRNO("pomp_loop_destroy", -ret);
+			VDEC_LOG_ERRNO("pomp_loop_destroy", -ret);
 	}
 
 	return NULL;
 }
 
 
+/* Called on the loop thread */
 static int get_supported_input_formats(const struct vdef_coded_format **formats)
 {
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);
 	*formats = supported_formats;
-	return NB_SUPPORTED_FORMATS;
+	return VDEC_VIDEOTOOLBOX_NB_SUPPORTED_FORMATS;
 }
 
 
+/* Called on the loop thread */
 static int stop(struct vdec_decoder *base)
 {
-	struct vdec_videotoolbox *self;
+	struct vdec_videotoolbox *self = NULL;
 
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
-
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 	self = base->derived;
 
 	/* Stop the decoding thread */
@@ -1280,13 +1404,14 @@ static int stop(struct vdec_decoder *base)
 }
 
 
+/* Called on the loop thread */
 static int destroy(struct vdec_decoder *base)
 {
 	int err;
-	struct vdec_videotoolbox *self;
+	struct vdec_videotoolbox *self = NULL;
 	OSStatus osstatus;
 
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
 	self = base->derived;
 	if (self == NULL)
@@ -1295,12 +1420,12 @@ static int destroy(struct vdec_decoder *base)
 	/* Stop and join the output thread */
 	err = stop(base);
 	if (err < 0)
-		ULOG_ERRNO("vdec_videotoolbox_stop", -err);
+		VDEC_LOG_ERRNO("vdec_videotoolbox_stop", -err);
 	if (self->decompress_ref) {
 		osstatus = VTDecompressionSessionWaitForAsynchronousFrames(
 			self->decompress_ref);
 		if (osstatus != noErr) {
-			ULOG_ERRNO(
+			VDEC_LOG_ERRNO(
 				"VTDecompressionSessionWaitFor"
 				"AsynchronousFrames status=%d",
 				EPROTO,
@@ -1310,7 +1435,7 @@ static int destroy(struct vdec_decoder *base)
 	if (self->thread_launched) {
 		err = pthread_join(self->thread, NULL);
 		if (err != 0)
-			ULOG_ERRNO("pthread_join", err);
+			VDEC_LOG_ERRNO("pthread_join", err);
 	}
 
 	/* Free the resources */
@@ -1318,24 +1443,25 @@ static int destroy(struct vdec_decoder *base)
 		err = pomp_evt_detach_from_loop(self->out_queue_evt,
 						base->loop);
 		if (err < 0)
-			ULOG_ERRNO("pomp_evt_detach_from_loop", -err);
+			VDEC_LOG_ERRNO("pomp_evt_detach_from_loop", -err);
 	}
 	if (self->out_queue != NULL) {
 		err = mbuf_raw_video_frame_queue_destroy(self->out_queue);
 		if (err < 0)
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_destroy", -err);
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_queue_destroy",
+				       -err);
 	}
 	if (self->in_queue != NULL) {
 		err = mbuf_coded_video_frame_queue_destroy(self->in_queue);
 		if (err < 0)
-			ULOG_ERRNO("mbuf_coded_video_frame_queue_destroy",
-				   -err);
+			VDEC_LOG_ERRNO("mbuf_coded_video_frame_queue_destroy",
+				       -err);
 	}
 	if (self->mbox != NULL) {
 		err = pomp_loop_remove(base->loop,
 				       mbox_get_read_fd(self->mbox));
 		if (err < 0)
-			ULOG_ERRNO("pomp_loop_remove", -err);
+			VDEC_LOG_ERRNO("pomp_loop_remove", -err);
 		mbox_destroy(self->mbox);
 	}
 	if (self->decompress_ref) {
@@ -1347,7 +1473,7 @@ static int destroy(struct vdec_decoder *base)
 
 	err = pomp_loop_idle_remove_by_cookie(base->loop, self);
 	if (err < 0)
-		ULOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
+		VDEC_LOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
 
 	free(self);
 
@@ -1355,6 +1481,7 @@ static int destroy(struct vdec_decoder *base)
 }
 
 
+/* Can be called on any thread */
 static bool input_filter(struct mbuf_coded_video_frame *frame, void *userdata)
 {
 	const void *tmp;
@@ -1363,16 +1490,20 @@ static bool input_filter(struct mbuf_coded_video_frame *frame, void *userdata)
 	struct vdec_videotoolbox *self = userdata;
 	int ret;
 
+	if (atomic_load(&self->flush_required))
+		return false;
+
 	ret = mbuf_coded_video_frame_get_frame_info(frame, &info);
 	if (ret != 0)
 		return false;
 
 	/* Pass default filters first */
-	if (!vdec_default_input_filter_internal(self->base,
-						frame,
-						&info,
-						supported_formats,
-						NB_SUPPORTED_FORMATS))
+	if (!vdec_default_input_filter_internal(
+		    self->base,
+		    frame,
+		    &info,
+		    supported_formats,
+		    VDEC_VIDEOTOOLBOX_NB_SUPPORTED_FORMATS))
 		return false;
 
 	/* Input frame must be packed */
@@ -1389,6 +1520,7 @@ static bool input_filter(struct mbuf_coded_video_frame *frame, void *userdata)
 }
 
 
+/* Called on the loop thread */
 static int create(struct vdec_decoder *base)
 {
 	int ret = 0;
@@ -1397,13 +1529,13 @@ static int create(struct vdec_decoder *base)
 		.filter = input_filter,
 	};
 
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
 	/* Check the configuration */
 	if (base->config.encoding != VDEF_ENCODING_H264 &&
 	    base->config.encoding != VDEF_ENCODING_H265) {
 		ret = -EINVAL;
-		ULOG_ERRNO("invalid encoding", -ret);
+		VDEC_LOG_ERRNO("invalid encoding", -ret);
 		return ret;
 	}
 
@@ -1416,7 +1548,7 @@ static int create(struct vdec_decoder *base)
 
 	switch (base->config.encoding) {
 	case VDEF_ENCODING_H264:
-		self->need_sync = true;
+		atomic_store(&self->need_sync, true);
 		break;
 	default:
 		break;
@@ -1426,7 +1558,7 @@ static int create(struct vdec_decoder *base)
 	self->mbox = mbox_new(sizeof(struct vdec_videotoolbox_message));
 	if (self->mbox == NULL) {
 		ret = -ENOMEM;
-		ULOG_ERRNO("mbox_new", -ret);
+		VDEC_LOG_ERRNO("mbox_new", -ret);
 		goto error;
 	}
 	ret = pomp_loop_add(base->loop,
@@ -1435,26 +1567,26 @@ static int create(struct vdec_decoder *base)
 			    &mbox_cb,
 			    self);
 	if (ret < 0) {
-		ULOG_ERRNO("pomp_loop_add", -ret);
+		VDEC_LOG_ERRNO("pomp_loop_add", -ret);
 		goto error;
 	}
 
 	/* Create the ouput buffers queue */
 	ret = mbuf_raw_video_frame_queue_new(&self->out_queue);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_queue_new", -ret);
+		VDEC_LOG_ERRNO("mbuf_raw_video_frame_queue_new", -ret);
 		goto error;
 	}
 	ret = mbuf_raw_video_frame_queue_get_event(self->out_queue,
 						   &self->out_queue_evt);
 	if (ret != 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_queue_get_event", -ret);
+		VDEC_LOG_ERRNO("mbuf_raw_video_frame_queue_get_event", -ret);
 		goto error;
 	}
 	ret = pomp_evt_attach_to_loop(
 		self->out_queue_evt, base->loop, &out_queue_evt_cb, self);
 	if (ret < 0) {
-		ULOG_ERRNO("pomp_evt_attach_to_loop", -ret);
+		VDEC_LOG_ERRNO("pomp_evt_attach_to_loop", -ret);
 		goto error;
 	}
 
@@ -1462,8 +1594,8 @@ static int create(struct vdec_decoder *base)
 	ret = mbuf_coded_video_frame_queue_new_with_args(&queue_args,
 							 &self->in_queue);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_new_with_filter",
-			   -ret);
+		VDEC_LOG_ERRNO("mbuf_coded_video_frame_queue_new_with_filter",
+			       -ret);
 		goto error;
 	}
 
@@ -1474,7 +1606,7 @@ static int create(struct vdec_decoder *base)
 			     (void *)self);
 	if (ret != 0) {
 		ret = -ret;
-		ULOG_ERRNO("pthread_create", -ret);
+		VDEC_LOG_ERRNO("pthread_create", -ret);
 		goto error;
 	} else {
 		self->thread_launched = true;
@@ -1490,14 +1622,20 @@ error:
 }
 
 
+/* Called on the loop thread */
 static int flush(struct vdec_decoder *base, int discard)
 {
-	struct vdec_videotoolbox *self;
+	struct vdec_videotoolbox *self = NULL;
 
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
-
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 	self = base->derived;
 
+	if (atomic_load(&self->flush_required)) {
+		VDEC_LOGW("flush is already pending");
+		return 0;
+	}
+
+	atomic_store(&self->flush_required, true);
 	atomic_store(&self->flush, true);
 	atomic_store(&self->flush_discard, (bool)discard);
 
@@ -1505,6 +1643,7 @@ static int flush(struct vdec_decoder *base, int discard)
 }
 
 
+/* Called on the loop thread */
 static int set_ps(struct vdec_decoder *base,
 		  const uint8_t *vps,
 		  size_t vps_size,
@@ -1515,7 +1654,7 @@ static int set_ps(struct vdec_decoder *base,
 		  const struct vdef_coded_format *format)
 {
 	int ret = 0;
-	struct vdec_videotoolbox *self;
+	struct vdec_videotoolbox *self = NULL;
 	const uint8_t *vps_tmp = NULL;
 	size_t vps_size_tmp = 0;
 	OSStatus osstatus;
@@ -1523,20 +1662,22 @@ static int set_ps(struct vdec_decoder *base,
 	VTDecompressionOutputCallbackRecord cb;
 	CMVideoCodecType codec_type;
 
-	ULOG_ERRNO_RETURN_ERR_IF(format == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(format == NULL, EINVAL);
 	size_t offset = (format->data_format == VDEF_CODED_DATA_FORMAT_RAW_NALU)
 				? 0
 				: 4;
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(
 		(format->encoding != VDEF_ENCODING_H264) &&
 			(format->encoding != VDEF_ENCODING_H265),
 		EINVAL);
 	if (format->encoding == VDEF_ENCODING_H265)
-		ULOG_ERRNO_RETURN_ERR_IF((vps == NULL) || (vps_size <= offset),
-					 EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF((sps == NULL) || (sps_size <= offset), EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF((pps == NULL) || (pps_size <= offset), EINVAL);
+		VDEC_LOG_ERRNO_RETURN_ERR_IF(
+			(vps == NULL) || (vps_size <= offset), EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((sps == NULL) || (sps_size <= offset),
+				     EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((pps == NULL) || (pps_size <= offset),
+				     EINVAL);
 
 	self = base->derived;
 
@@ -1563,7 +1704,7 @@ static int set_ps(struct vdec_decoder *base,
 							format->encoding);
 	if (decoder_config == NULL) {
 		ret = -ENOMEM;
-		ULOG_ERRNO("vdec_videotoolbox_decoder_config_create", -ret);
+		VDEC_LOG_ERRNO("vdec_videotoolbox_decoder_config_create", -ret);
 		goto error;
 	}
 
@@ -1575,9 +1716,9 @@ static int set_ps(struct vdec_decoder *base,
 						  &self->format_desc_ref);
 	if (osstatus != noErr) {
 		ret = -EPROTO;
-		ULOG_ERRNO("CMVideoFormatDescriptionCreate status=%d",
-			   -ret,
-			   (int)osstatus);
+		VDEC_LOG_ERRNO("CMVideoFormatDescriptionCreate status=%d",
+			       -ret,
+			       (int)osstatus);
 		goto error;
 	}
 
@@ -1587,7 +1728,7 @@ static int set_ps(struct vdec_decoder *base,
 		base->video_info.full_range);
 	if (buffer_attr == NULL) {
 		ret = -ENOMEM;
-		ULOG_ERRNO("vdec_videotoolbox_buffer_attr_create", -ret);
+		VDEC_LOG_ERRNO("vdec_videotoolbox_buffer_attr_create", -ret);
 		goto error;
 	}
 
@@ -1602,9 +1743,9 @@ static int set_ps(struct vdec_decoder *base,
 						&self->decompress_ref);
 	if (osstatus != noErr) {
 		ret = -EPROTO;
-		ULOG_ERRNO("VTDecompressionSessionCreate status=%d",
-			   -ret,
-			   (int)osstatus);
+		VDEC_LOG_ERRNO("VTDecompressionSessionCreate status=%d",
+			       -ret,
+			       (int)osstatus);
 		goto error;
 	}
 
@@ -1630,6 +1771,7 @@ error:
 }
 
 
+/* Called on the loop thread */
 static int set_h264_ps(struct vdec_decoder *base,
 		       const uint8_t *sps,
 		       size_t sps_size,
@@ -1641,6 +1783,7 @@ static int set_h264_ps(struct vdec_decoder *base,
 }
 
 
+/* Called on the loop thread */
 static int set_h265_ps(struct vdec_decoder *base,
 		       const uint8_t *vps,
 		       size_t vps_size,
@@ -1655,22 +1798,26 @@ static int set_h265_ps(struct vdec_decoder *base,
 }
 
 
+/* Called on the loop thread */
 static struct mbuf_pool *get_input_buffer_pool(struct vdec_decoder *base)
 {
-	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
+	struct vdec_videotoolbox *self = NULL;
+
+	VDEC_LOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
+	self = base->derived;
 
 	/* No input buffer pool allocated: use the application's */
 	return NULL;
 }
 
 
+/* Called on the loop thread */
 static struct mbuf_coded_video_frame_queue *
 get_input_buffer_queue(struct vdec_decoder *base)
 {
-	struct vdec_videotoolbox *self;
+	struct vdec_videotoolbox *self = NULL;
 
-	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
-
+	VDEC_LOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
 	self = base->derived;
 
 	return self->in_queue;

@@ -45,7 +45,7 @@ extern "C" {
 #endif /* !VDEC_API_EXPORTS */
 
 
-struct vdec_ffmpeg;
+#define VDEC_FFMPEG_NB_SUPPORTED_FORMATS 2
 
 
 extern VDEC_API const struct vdec_ops vdec_ffmpeg_ops;

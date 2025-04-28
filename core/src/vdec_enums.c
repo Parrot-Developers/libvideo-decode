@@ -37,8 +37,6 @@ const char *vdec_decoder_implem_str(enum vdec_decoder_implem implem)
 		return "MEDIACODEC";
 	case VDEC_DECODER_IMPLEM_VIDEOTOOLBOX:
 		return "VIDEOTOOLBOX";
-	case VDEC_DECODER_IMPLEM_VIDEOCOREMMAL:
-		return "VIDEOCOREMMAL";
 	case VDEC_DECODER_IMPLEM_HISI:
 		return "HISI";
 	case VDEC_DECODER_IMPLEM_AML:

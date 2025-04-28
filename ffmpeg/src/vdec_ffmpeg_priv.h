@@ -62,7 +62,7 @@ struct vdec_ffmpeg {
 	struct pomp_evt *out_queue_evt;
 	AVCodecContext *avcodec;
 	AVBufferRef *hw_device_ctx;
-	AVPacket avpacket;
+	AVPacket *avpacket;
 	AVFrame *dummy_frame;
 	atomic_int flushing;
 

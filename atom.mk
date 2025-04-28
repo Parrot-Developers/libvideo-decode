@@ -26,7 +26,6 @@ LOCAL_CONDITIONAL_LIBRARIES := \
 	CONFIG_VDEC_MEDIACODEC:libvideo-decode-mediacodec \
 	CONFIG_VDEC_QCOM:libvideo-decode-qcom \
 	CONFIG_VDEC_TURBOJPEG:libvideo-decode-turbojpeg \
-	CONFIG_VDEC_VIDEOCOREMMAL:libvideo-decode-videocoremmal \
 	CONFIG_VDEC_VIDEOTOOLBOX:libvideo-decode-videotoolbox
 LOCAL_EXPORT_LDLIBS := -lvideo-decode-core
 ifeq ("$(TARGET_OS)","windows")
@@ -131,7 +130,7 @@ LOCAL_MODULE := libvideo-decode-turbojpeg
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video decoding library: turbojpeg implementation
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/turbojpeg/include
-LOCAL_CFLAGS := -DVDEC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_CFLAGS := -DVDEC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	turbojpeg/src/vdec_turbojpeg.c
 LOCAL_LIBRARIES := \
@@ -149,31 +148,6 @@ LOCAL_LIBRARIES := \
 
 include $(BUILD_LIBRARY)
 
-include $(CLEAR_VARS)
-
-# VideoCore MMAL (RaspberryPi) implementation.
-# can be enabled in the product configuration
-LOCAL_MODULE := libvideo-decode-videocoremmal
-LOCAL_CATEGORY_PATH := libs
-LOCAL_DESCRIPTION := Video decoding library: videocoremmal implementation
-LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/videocoremmal/include
-LOCAL_CFLAGS := -DVDEC_API_EXPORTS -fvisibility=hidden -std=gnu99
-LOCAL_SRC_FILES := \
-	videocoremmal/src/vdec_videocoremmal.c
-LOCAL_LIBRARIES := \
-	libfutils \
-	libmedia-buffers \
-	libmedia-buffers-memory \
-	libpomp \
-	libulog \
-	libvideo-decode-core \
-	libvideo-defs \
-	mmal
-ifeq ("$(TARGET_OS)","windows")
-  LOCAL_LDLIBS += -lws2_32
-endif
-
-include $(BUILD_LIBRARY)
 
 ifeq ("${TARGET_OS}", "darwin")
 include $(CLEAR_VARS)
@@ -226,8 +200,6 @@ LOCAL_LIBRARIES := \
 	libvideo-decode \
 	libvideo-defs \
 	libvideo-raw
-LOCAL_CONDITIONAL_LIBRARIES := \
-	OPTIONAL:mmal
 
 ifeq ("$(TARGET_OS)-$(TARGET_OS_FLAVOUR)-$(TARGET_PRODUCT_VARIANT)","linux-generic-raspi")
   LOCAL_LDLIBS += -lbcm_host -lvchiq_arm

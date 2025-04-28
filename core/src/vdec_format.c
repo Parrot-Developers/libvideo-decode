@@ -175,6 +175,8 @@ void vdec_call_frame_output_cb(struct vdec_decoder *base,
 		return;
 
 	base->cbs.frame_output(base, status, frame, base->userdata);
+	if (status == 0 && frame != NULL)
+		atomic_fetch_add(&base->counters.out, 1);
 }
 
 
@@ -275,6 +277,7 @@ void vdec_default_input_filter_internal_confirm_frame(
 	/* Save frame timestamp to last_timestamp */
 	uint_least64_t last_timestamp = frame_info->info.timestamp;
 	atomic_store(&decoder->last_timestamp, last_timestamp);
+	atomic_fetch_add(&decoder->counters.in, 1);
 
 	/* Set the input time ancillary data to the frame */
 	time_get_monotonic(&cur_ts);

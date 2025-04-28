@@ -174,7 +174,7 @@ static void unmap_file(struct vdec_prog *self)
 	self->in_file = INVALID_HANDLE_VALUE;
 #else
 	if (self->in_fd >= 0) {
-		if (self->in_data != NULL)
+		if (self->in_data != NULL && self->in_len > 0)
 			munmap(self->in_data, self->in_len);
 		self->in_data = NULL;
 		close(self->in_fd);
@@ -229,6 +229,8 @@ static int map_file(struct vdec_prog *self)
 		goto error;
 	}
 #else
+	off_t size;
+
 	/* Try to open input file */
 	self->in_fd = open(self->input_file, O_RDONLY);
 	if (self->in_fd < 0) {
@@ -238,12 +240,14 @@ static int map_file(struct vdec_prog *self)
 	}
 
 	/* Get size and map it */
-	self->in_len = lseek(self->in_fd, 0, SEEK_END);
-	if (self->in_len == (size_t)-1) {
+	size = lseek(self->in_fd, 0, SEEK_END);
+	if (size < 0) {
 		res = -errno;
+		self->in_len = 0;
 		ULOG_ERRNO("lseek", -res);
 		goto error;
 	}
+	self->in_len = (size_t)size;
 
 	self->in_data = mmap(
 		NULL, self->in_len, PROT_READ, MAP_PRIVATE, self->in_fd, 0);
@@ -338,7 +342,7 @@ static int configure(struct vdec_prog *self)
 			.framerate = self->framerate,
 			.color_primaries = VDEF_COLOR_PRIMARIES_SRGB,
 			.transfer_function = VDEF_TRANSFER_FUNCTION_BT709,
-			.matrix_coefs = VDEF_MATRIX_COEFS_SRGB,
+			.matrix_coefs = VDEF_MATRIX_COEFS_BT709,
 			.resolution = {
 				.width = self->metadata.width,
 				.height = self->metadata.height,

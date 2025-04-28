@@ -28,6 +28,7 @@
 #define _VDEC_VIDEOTOOLBOX_H_
 
 #include <video-decode/vdec_core.h>
+#include <video-decode/vdec_internal.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,7 +46,7 @@ extern "C" {
 #endif /* !VDEC_API_EXPORTS */
 
 
-struct vdec_videotoolbox;
+#define VDEC_VIDEOTOOLBOX_NB_SUPPORTED_FORMATS 2
 
 
 extern VDEC_API const struct vdec_ops vdec_videotoolbox_ops;

@@ -29,6 +29,108 @@
 ULOG_DECLARE_TAG(vdec);
 
 
+#ifndef VDEC_FFMPEG_NB_SUPPORTED_FORMATS
+#	define VDEC_FFMPEG_NB_SUPPORTED_FORMATS 0
+#endif
+#ifndef VDEC_MEDIACODEC_NB_SUPPORTED_FORMATS
+#	define VDEC_MEDIACODEC_NB_SUPPORTED_FORMATS 0
+#endif
+#ifndef VDEC_VIDEOTOOLBOX_NB_SUPPORTED_FORMATS
+#	define VDEC_VIDEOTOOLBOX_NB_SUPPORTED_FORMATS 0
+#endif
+#ifndef VDEC_HISI_NB_SUPPORTED_FORMATS
+#	define VDEC_HISI_NB_SUPPORTED_FORMATS 0
+#endif
+#ifndef VDEC_AML_NB_SUPPORTED_FORMATS
+#	define VDEC_AML_NB_SUPPORTED_FORMATS 0
+#endif
+#ifndef VDEC_TURBOJPEG_NB_SUPPORTED_FORMATS
+#	define VDEC_TURBOJPEG_NB_SUPPORTED_FORMATS 0
+#endif
+#ifndef VDEC_QCOM_NB_SUPPORTED_FORMATS
+#	define VDEC_QCOM_NB_SUPPORTED_FORMATS 0
+#endif
+
+#define MAX_NB_SUPPORTED_FORMATS                                               \
+	(VDEC_FFMPEG_NB_SUPPORTED_FORMATS +                                    \
+	 VDEC_MEDIACODEC_NB_SUPPORTED_FORMATS +                                \
+	 VDEC_VIDEOTOOLBOX_NB_SUPPORTED_FORMATS +                              \
+	 VDEC_HISI_NB_SUPPORTED_FORMATS + VDEC_AML_NB_SUPPORTED_FORMATS +      \
+	 VDEC_TURBOJPEG_NB_SUPPORTED_FORMATS + VDEC_QCOM_NB_SUPPORTED_FORMATS)
+
+
+static atomic_int s_instance_counter;
+static pthread_once_t instance_counter_is_init = PTHREAD_ONCE_INIT;
+static void initialize_instance_counter(void)
+{
+	atomic_init(&s_instance_counter, 0);
+}
+
+
+static unsigned int supported_format_count;
+static struct vdef_coded_format supported_formats[MAX_NB_SUPPORTED_FORMATS];
+static pthread_once_t supported_formats_is_init = PTHREAD_ONCE_INIT;
+
+
+static void add_supported_formats(const struct vdef_coded_format *formats,
+				  int count)
+{
+	for (int i = 0; i < count; i++) {
+		bool found = false;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunreachable-code"
+		/* coverity[unreachable] */
+		for (unsigned int j = 0; j < supported_format_count; j++) {
+			if (vdef_coded_format_cmp(&formats[i],
+						  &supported_formats[j]))
+				found = true;
+			break;
+		}
+#pragma GCC diagnostic pop
+		if (found)
+			continue;
+		supported_formats[supported_format_count++] = formats[i];
+	}
+}
+
+
+static void initialize_supported_formats(void)
+{
+	int count VDEC_UNUSED;
+	const struct vdef_coded_format *formats VDEC_UNUSED;
+
+	supported_format_count = 0;
+#ifdef BUILD_LIBVIDEO_DECODE_FFMPEG
+	count = vdec_ffmpeg_ops.get_supported_input_formats(&formats);
+	add_supported_formats(formats, count);
+#endif
+#ifdef BUILD_LIBVIDEO_DECODE_MEDIACODEC
+	count = vdec_mediacodec_ops.get_supported_input_formats(&formats);
+	add_supported_formats(formats, count);
+#endif
+#ifdef BUILD_LIBVIDEO_DECODE_VIDEOTOOLBOX
+	count = vdec_videotoolbox_ops.get_supported_input_formats(&formats);
+	add_supported_formats(formats, count);
+#endif
+#ifdef BUILD_LIBVIDEO_DECODE_HISI
+	count = vdec_hisi_ops.get_supported_input_formats(&formats);
+	add_supported_formats(formats, count);
+#endif
+#ifdef BUILD_LIBVIDEO_DECODE_AML
+	count = vdec_aml_ops.get_supported_input_formats(&formats);
+	add_supported_formats(formats, count);
+#endif
+#ifdef BUILD_LIBVIDEO_DECODE_TURBOJPEG
+	count = vdec_turbojpeg_ops.get_supported_input_formats(&formats);
+	add_supported_formats(formats, count);
+#endif
+#ifdef BUILD_LIBVIDEO_DECODE_QCOM
+	count = vdec_qcom_ops.get_supported_input_formats(&formats);
+	add_supported_formats(formats, count);
+#endif
+}
+
+
 static const struct vdec_ops *implem_ops(enum vdec_decoder_implem implem)
 {
 	switch (implem) {
@@ -36,14 +138,9 @@ static const struct vdec_ops *implem_ops(enum vdec_decoder_implem implem)
 	case VDEC_DECODER_IMPLEM_FFMPEG:
 		return &vdec_ffmpeg_ops;
 #endif
-
 #ifdef BUILD_LIBVIDEO_DECODE_MEDIACODEC
 	case VDEC_DECODER_IMPLEM_MEDIACODEC:
 		return &vdec_mediacodec_ops;
-#endif
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOCOREMMAL
-	case VDEC_DECODER_IMPLEM_VIDEOCOREMMAL:
-		return &vdec_videocoremmal_ops;
 #endif
 #ifdef BUILD_LIBVIDEO_DECODE_VIDEOTOOLBOX
 	case VDEC_DECODER_IMPLEM_VIDEOTOOLBOX:
@@ -91,14 +188,6 @@ static int vdec_get_implem(enum vdec_decoder_implem *implem)
 	}
 #endif /* BUILD_LIBVIDEO_DECODE_HISI */
 
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOCOREMMAL
-	if ((*implem == VDEC_DECODER_IMPLEM_AUTO) ||
-	    (*implem == VDEC_DECODER_IMPLEM_VIDEOCOREMMAL)) {
-		*implem = VDEC_DECODER_IMPLEM_VIDEOCOREMMAL;
-		return 0;
-	}
-#endif /* BUILD_LIBVIDEO_DECODE_VIDEOCOREMMAL */
-
 #ifdef BUILD_LIBVIDEO_DECODE_VIDEOTOOLBOX
 	if ((*implem == VDEC_DECODER_IMPLEM_AUTO) ||
 	    (*implem == VDEC_DECODER_IMPLEM_VIDEOTOOLBOX)) {
@@ -143,50 +232,51 @@ static int vdec_get_implem(enum vdec_decoder_implem *implem)
 }
 
 
-static void log_video_info(struct video_info *info, int level)
+static void
+log_video_info(struct vdec_decoder *self, struct video_info *info, int level)
 {
 	/* Log photo/video info */
-	ULOG_PRI(level,
-		 "dimensions: width=%u height=%u SAR=%u:%u",
-		 info->resolution.width,
-		 info->resolution.height,
-		 info->sar.width,
-		 info->sar.height);
-	ULOG_PRI(level,
-		 "crop: left=%u top=%u width=%u height=%u",
-		 info->crop.left,
-		 info->crop.top,
-		 info->crop.width,
-		 info->crop.height);
+	VDEC_LOG_INT(level,
+		     "dimensions: width=%u height=%u SAR=%u:%u",
+		     info->resolution.width,
+		     info->resolution.height,
+		     info->sar.width,
+		     info->sar.height);
+	VDEC_LOG_INT(level,
+		     "crop: left=%u top=%u width=%u height=%u",
+		     info->crop.left,
+		     info->crop.top,
+		     info->crop.width,
+		     info->crop.height);
 	if ((info->framerate.num != 0) && (info->framerate.den != 0)) {
-		ULOG_PRI(level,
-			 "declared framerate: %u/%u -> %.3f fps",
-			 info->framerate.num,
-			 info->framerate.den,
-			 (float)info->framerate.num /
-				 (float)info->framerate.den);
+		VDEC_LOG_INT(level,
+			     "declared framerate: %u/%u -> %.3f fps",
+			     info->framerate.num,
+			     info->framerate.den,
+			     (float)info->framerate.num /
+				     (float)info->framerate.den);
 	}
-	ULOG_PRI(level,
-		 "%d bits, color primaries: %s, transfer function: %s, "
-		 "matrix coefficients: %s, full range: %d",
-		 info->bit_depth,
-		 vdef_color_primaries_to_str(info->color_primaries),
-		 vdef_transfer_function_to_str(info->transfer_function),
-		 vdef_matrix_coefs_to_str(info->matrix_coefs),
-		 info->full_range);
+	VDEC_LOG_INT(level,
+		     "%d bits, color primaries: %s, transfer function: %s, "
+		     "matrix coefficients: %s, full range: %d",
+		     info->bit_depth,
+		     vdef_color_primaries_to_str(info->color_primaries),
+		     vdef_transfer_function_to_str(info->transfer_function),
+		     vdef_matrix_coefs_to_str(info->matrix_coefs),
+		     info->full_range);
 	if ((info->nal_hrd_bitrate != 0) && (info->nal_hrd_cpb_size != 0)) {
-		ULOG_PRI(level,
-			 "declared NAL bitrate: "
-			 "%u bit/s (CPB size %u bits)",
-			 info->nal_hrd_bitrate,
-			 info->nal_hrd_cpb_size);
+		VDEC_LOG_INT(level,
+			     "declared NAL bitrate: "
+			     "%u bit/s (CPB size %u bits)",
+			     info->nal_hrd_bitrate,
+			     info->nal_hrd_cpb_size);
 	}
 	if ((info->vcl_hrd_bitrate != 0) && (info->vcl_hrd_cpb_size != 0)) {
-		ULOG_PRI(level,
-			 "declared VCL bitrate: "
-			 "%u bit/s (CPB size %u bits)",
-			 info->vcl_hrd_bitrate,
-			 info->vcl_hrd_cpb_size);
+		VDEC_LOG_INT(level,
+			     "declared VCL bitrate: "
+			     "%u bit/s (CPB size %u bits)",
+			     info->vcl_hrd_bitrate,
+			     info->vcl_hrd_cpb_size);
 	}
 }
 
@@ -204,6 +294,18 @@ int vdec_get_supported_input_formats(enum vdec_decoder_implem implem,
 	}
 
 	return implem_ops(implem)->get_supported_input_formats(formats);
+}
+
+
+int vdec_get_all_supported_input_formats(
+	const struct vdef_coded_format **formats)
+{
+	ULOG_ERRNO_RETURN_ERR_IF(!formats, EINVAL);
+
+	(void)pthread_once(&supported_formats_is_init,
+			   initialize_supported_formats);
+	*formats = supported_formats;
+	return supported_format_count;
 }
 
 
@@ -261,10 +363,10 @@ static void h264_nalu_begin_cb(struct h264_ctx *ctx,
 {
 	struct vdec_decoder *self = userdata;
 
-	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(ctx == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(buf == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(len == 0, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(ctx == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(buf == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(len == 0, EINVAL);
 
 	vdec_dbg_h264_nalu_begin(self, *nh, type);
 }
@@ -280,15 +382,15 @@ static void h264_slice_cb(struct h264_ctx *ctx,
 	struct h264_nalu_header nh;
 	int res;
 
-	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(ctx == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(buf == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(len == 0, EINVAL);
-	ULOG_ERRNO_RETURN_IF(sh == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(ctx == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(buf == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(len == 0, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(sh == NULL, EINVAL);
 
 	res = h264_parse_nalu_header(buf, len, &nh);
 	if (res < 0) {
-		ULOG_ERRNO("h264_parse_nalu_header", -res);
+		VDEC_LOG_ERRNO("h264_parse_nalu_header", -res);
 		return;
 	}
 	vdec_dbg_h264_slice(self, nh, sh);
@@ -310,11 +412,11 @@ static void h265_nalu_begin_cb(struct h265_ctx *ctx,
 {
 	struct vdec_decoder *self = userdata;
 
-	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(ctx == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(buf == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(len == 0, EINVAL);
-	ULOG_ERRNO_RETURN_IF(nh == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(ctx == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(buf == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(len == 0, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_IF(nh == NULL, EINVAL);
 
 	vdec_dbg_h265_nalu_begin(self, type);
 }
@@ -333,15 +435,22 @@ int vdec_new(struct pomp_loop *loop,
 {
 	int ret, dbgret;
 	struct vdec_decoder *self = NULL;
+	const char *env_low_delay;
+	const char *env_preferred_thread_count;
 	const char *env_dbg_dir;
 	const char *env_dbg_flags;
 
-	ULOG_ERRNO_RETURN_ERR_IF(loop == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(config == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(cbs == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(cbs->frame_output == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(ret_obj == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(loop == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(config == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(cbs == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(cbs->frame_output == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(ret_obj == NULL, EINVAL);
 
+	(void)pthread_once(&instance_counter_is_init,
+			   initialize_instance_counter);
+
+	env_low_delay = getenv("VDEC_LOW_DELAY");
+	env_preferred_thread_count = getenv("VDEC_PREFERRED_THREAD_COUNT");
 	env_dbg_dir = getenv("VDEC_DBG_DIR");
 	env_dbg_flags = getenv("VDEC_DBG_FLAGS");
 
@@ -349,14 +458,36 @@ int vdec_new(struct pomp_loop *loop,
 	if (self == NULL)
 		return -ENOMEM;
 
+	self->base = self; /* For logging */
 	self->loop = loop;
 	self->cbs = *cbs;
 	self->userdata = userdata;
 	self->config = *config;
 	self->config.name = xstrdup(config->name);
 	atomic_init(&self->last_timestamp, UINT64_MAX);
+	atomic_init(&self->counters.in, 0);
+	atomic_init(&self->counters.out, 0);
+	atomic_init(&self->counters.pulled, 0);
+	atomic_init(&self->counters.pushed, 0);
+	self->dec_id = (atomic_fetch_add(&s_instance_counter, 1) + 1);
+
+	if (self->config.name != NULL)
+		ret = asprintf(&self->dec_name, "%s", self->config.name);
+	else
+		ret = asprintf(&self->dec_name, "%02d", self->dec_id);
+	if (ret < 0) {
+		ret = -ENOMEM;
+		VDEC_LOG_ERRNO("asprintf", -ret);
+		goto error;
+	}
 
 	/* Override debug config with environment if set */
+	if (env_low_delay != NULL)
+		self->config.low_delay = strtol(env_low_delay, NULL, 0);
+	if (env_preferred_thread_count != NULL) {
+		self->config.preferred_thread_count =
+			strtol(env_preferred_thread_count, NULL, 0);
+	}
 	if (env_dbg_dir != NULL)
 		self->config.dbg_dir = strdup(env_dbg_dir);
 	else
@@ -380,13 +511,13 @@ int vdec_new(struct pomp_loop *loop,
 	case VDEF_ENCODING_H264:
 		ret = h264_reader_new(&h264_cbs, self, &self->reader.h264);
 		if (ret < 0)
-			ULOG_ERRNO("h264_reader_new", -ret);
+			VDEC_LOG_ERRNO("h264_reader_new", -ret);
 		break;
 
 	case VDEF_ENCODING_H265:
 		ret = h265_reader_new(&h265_cbs, self, &self->reader.h265);
 		if (ret < 0)
-			ULOG_ERRNO("h265_reader_new", -ret);
+			VDEC_LOG_ERRNO("h265_reader_new", -ret);
 		break;
 	default:
 		break;
@@ -395,7 +526,7 @@ int vdec_new(struct pomp_loop *loop,
 	if (self->config.dbg_dir != NULL) {
 		dbgret = vdec_dbg_create_files(self);
 		if (dbgret < 0)
-			ULOG_ERRNO("vdec_dbg_create_files", -dbgret);
+			VDEC_LOG_ERRNO("vdec_dbg_create_files", -dbgret);
 	}
 
 	*ret_obj = self;
@@ -410,7 +541,7 @@ error:
 
 int vdec_flush(struct vdec_decoder *self, int discard)
 {
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
 
 	return self->ops->flush(self, discard);
 }
@@ -418,7 +549,7 @@ int vdec_flush(struct vdec_decoder *self, int discard)
 
 int vdec_stop(struct vdec_decoder *self)
 {
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
 
 	return self->ops->stop(self);
 }
@@ -436,7 +567,7 @@ int vdec_destroy(struct vdec_decoder *self)
 		if (self->reader.h264 != NULL) {
 			ret = h264_reader_destroy(self->reader.h264);
 			if (ret < 0)
-				ULOG_ERRNO("h264_reader_destroy", -ret);
+				VDEC_LOG_ERRNO("h264_reader_destroy", -ret);
 		}
 		break;
 
@@ -444,7 +575,7 @@ int vdec_destroy(struct vdec_decoder *self)
 		if (self->reader.h265 != NULL) {
 			ret = h265_reader_destroy(self->reader.h265);
 			if (ret < 0)
-				ULOG_ERRNO("h265_reader_destroy", -ret);
+				VDEC_LOG_ERRNO("h265_reader_destroy", -ret);
 		}
 		break;
 	default:
@@ -452,14 +583,22 @@ int vdec_destroy(struct vdec_decoder *self)
 	}
 
 
-	ret = self->ops->destroy(self);
+	if (self->ops)
+		ret = self->ops->destroy(self);
+
+	VDEC_LOGI("vdec instance stats: [%u [%u %u] %u]",
+		  self->counters.in,
+		  self->counters.pushed,
+		  self->counters.pulled,
+		  self->counters.out);
 
 	if (ret == 0) {
 		dbgret = vdec_dbg_close_files(self);
 		if (dbgret < 0)
-			ULOG_ERRNO("vdec_dbg_close_files", -dbgret);
+			VDEC_LOG_ERRNO("vdec_dbg_close_files", -dbgret);
 		xfree((void **)&self->config.name);
 		xfree((void **)&self->config.dbg_dir);
+		xfree((void **)&self->dec_name);
 		free(self);
 	}
 
@@ -473,27 +612,28 @@ int vdec_set_jpeg_params(struct vdec_decoder *self,
 	int ret = 0, count;
 	const struct vdef_coded_format *supported_input_formats;
 
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(format_info == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF((format_info->resolution.width == 0) ||
-					 (format_info->resolution.height == 0),
-				 EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF((format_info->framerate.num == 0) ||
-					 (format_info->framerate.den == 0),
-				 EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(self->config.encoding != VDEF_ENCODING_MJPEG,
-				 EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(format_info == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(
+		(format_info->resolution.width == 0) ||
+			(format_info->resolution.height == 0),
+		EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((format_info->framerate.num == 0) ||
+					     (format_info->framerate.den == 0),
+				     EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(
+		self->config.encoding != VDEF_ENCODING_MJPEG, EINVAL);
 
 	count = self->ops->get_supported_input_formats(
 		&supported_input_formats);
 	if (count < 0) {
-		ULOG_ERRNO("get_supported_input_formats", -count);
+		VDEC_LOG_ERRNO("get_supported_input_formats", -count);
 		return -EINVAL;
 	}
 
 	if (!vdef_coded_format_intersect(
 		    &vdef_jpeg_jfif, supported_input_formats, count)) {
-		ULOG_ERRNO("unsupported input formats", EINVAL);
+		VDEC_LOG_ERRNO("unsupported input formats", EINVAL);
 		return -EINVAL;
 	}
 
@@ -518,13 +658,13 @@ int vdec_set_jpeg_params(struct vdec_decoder *self,
 	    (self->video_info.color_primaries != VDEF_COLOR_PRIMARIES_SRGB) ||
 	    (self->video_info.transfer_function !=
 	     VDEF_TRANSFER_FUNCTION_BT709) ||
-	    (self->video_info.matrix_coefs != VDEF_MATRIX_COEFS_SRGB)) {
-		ULOG_ERRNO("invalid input format", EINVAL);
-		log_video_info(&self->video_info, ULOG_ERR);
+	    (self->video_info.matrix_coefs != VDEF_MATRIX_COEFS_BT709)) {
+		VDEC_LOG_ERRNO("invalid input format", EINVAL);
+		log_video_info(self, &self->video_info, ULOG_ERR);
 		return -EINVAL;
 	}
 
-	log_video_info(&self->video_info, ULOG_INFO);
+	log_video_info(self, &self->video_info, ULOG_INFO);
 
 	if (!self->ops->set_jpeg_params) {
 		self->configured = 1;
@@ -546,12 +686,12 @@ int vdec_set_h264_ps(struct vdec_decoder *self,
 {
 	int ret, count;
 
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(format == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(format->encoding != self->config.encoding,
-				 EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(format->encoding != VDEF_ENCODING_H264,
-				 EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(format == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(format->encoding != self->config.encoding,
+				     EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(format->encoding != VDEF_ENCODING_H264,
+				     EINVAL);
 
 	size_t offset = (format->data_format == VDEF_CODED_DATA_FORMAT_RAW_NALU)
 				? 0
@@ -563,9 +703,11 @@ int vdec_set_h264_ps(struct vdec_decoder *self,
 	const struct vdef_coded_format *supported_input_formats;
 	uint32_t sc;
 
-	ULOG_ERRNO_RETURN_ERR_IF((sps == NULL) || (sps_size <= offset), EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF((pps == NULL) || (pps_size <= offset), EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(self->configured, EALREADY);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((sps == NULL) || (sps_size <= offset),
+				     EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((pps == NULL) || (pps_size <= offset),
+				     EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(self->configured, EALREADY);
 
 	/* SPS and PPS parsing */
 	size = 4 + sps_size - offset + 4 + pps_size - offset;
@@ -585,14 +727,14 @@ int vdec_set_h264_ps(struct vdec_decoder *self,
 
 	ret = h264_reader_parse(self->reader.h264, 0, data, size, &off);
 	if (ret < 0) {
-		ULOG_ERRNO("h264_reader_parse", -ret);
+		VDEC_LOG_ERRNO("h264_reader_parse", -ret);
 		goto out;
 	}
 
 	/* Get the video info */
 	ret = h264_ctx_get_info(ctx, &info);
 	if (ret < 0) {
-		ULOG_ERRNO("h264_ctx_get_info", -ret);
+		VDEC_LOG_ERRNO("h264_ctx_get_info", -ret);
 		goto out;
 	}
 
@@ -619,12 +761,12 @@ int vdec_set_h264_ps(struct vdec_decoder *self,
 		.vcl_hrd_cpb_size = info.vcl_hrd_cpb_size,
 	};
 
-	log_video_info(&self->video_info, ULOG_INFO);
+	log_video_info(self, &self->video_info, ULOG_INFO);
 
 	count = self->ops->get_supported_input_formats(
 		&supported_input_formats);
 	if (count < 0) {
-		ULOG_ERRNO("get_supported_input_formats", -count);
+		VDEC_LOG_ERRNO("get_supported_input_formats", -count);
 		goto out;
 	}
 
@@ -674,7 +816,7 @@ int vdec_set_h264_ps(struct vdec_decoder *self,
 					&vdef_h264_avcc);
 			} else {
 				ret = -ENOSYS;
-				ULOG_ERRNO(
+				VDEC_LOG_ERRNO(
 					"unsupported format:"
 					" " VDEF_CODED_FORMAT_TO_STR_FMT,
 					-ret,
@@ -697,7 +839,7 @@ int vdec_set_h264_ps(struct vdec_decoder *self,
 						    pps_size,
 						    format);
 		if (dbgret < 0)
-			ULOG_ERRNO("vdec_dbg_write_h264_ps", -dbgret);
+			VDEC_LOG_ERRNO("vdec_dbg_write_h264_ps", -dbgret);
 	}
 
 out:
@@ -718,12 +860,12 @@ int vdec_set_h265_ps(struct vdec_decoder *self,
 {
 	int ret, count;
 
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(format == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(format->encoding != self->config.encoding,
-				 EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(format->encoding != VDEF_ENCODING_H265,
-				 EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(format == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(format->encoding != self->config.encoding,
+				     EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(format->encoding != VDEF_ENCODING_H265,
+				     EINVAL);
 
 	size_t offset = (format->data_format == VDEF_CODED_DATA_FORMAT_RAW_NALU)
 				? 0
@@ -735,10 +877,13 @@ int vdec_set_h265_ps(struct vdec_decoder *self,
 	const struct vdef_coded_format *supported_input_formats;
 	uint32_t sc;
 
-	ULOG_ERRNO_RETURN_ERR_IF((vps == NULL) || (vps_size <= offset), EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF((sps == NULL) || (sps_size <= offset), EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF((pps == NULL) || (pps_size <= offset), EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(self->configured, EALREADY);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((vps == NULL) || (vps_size <= offset),
+				     EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((sps == NULL) || (sps_size <= offset),
+				     EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((pps == NULL) || (pps_size <= offset),
+				     EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(self->configured, EALREADY);
 
 	/* VPS, SPS and PPS parsing */
 	size = 4 + vps_size - offset + 4 + sps_size - offset + 4 + pps_size -
@@ -764,14 +909,14 @@ int vdec_set_h265_ps(struct vdec_decoder *self,
 
 	ret = h265_reader_parse(self->reader.h265, 0, data, size, &off);
 	if (ret < 0) {
-		ULOG_ERRNO("h265_reader_parse", -ret);
+		VDEC_LOG_ERRNO("h265_reader_parse", -ret);
 		goto out;
 	}
 
 	/* Get the video info */
 	ret = h265_ctx_get_info(ctx, &info);
 	if (ret < 0) {
-		ULOG_ERRNO("h264_ctx_get_info", -ret);
+		VDEC_LOG_ERRNO("h264_ctx_get_info", -ret);
 		goto out;
 	}
 
@@ -798,13 +943,13 @@ int vdec_set_h265_ps(struct vdec_decoder *self,
 		.vcl_hrd_cpb_size = info.vcl_hrd_cpb_size,
 	};
 
-	log_video_info(&self->video_info, ULOG_INFO);
+	log_video_info(self, &self->video_info, ULOG_INFO);
 
 	if (self->ops->set_h265_ps) {
 		count = self->ops->get_supported_input_formats(
 			&supported_input_formats);
 		if (count < 0) {
-			ULOG_ERRNO("get_supported_input_formats", -count);
+			VDEC_LOG_ERRNO("get_supported_input_formats", -count);
 			goto out;
 		}
 
@@ -873,7 +1018,7 @@ int vdec_set_h265_ps(struct vdec_decoder *self,
 					&vdef_h265_hvcc);
 			} else {
 				ret = -ENOSYS;
-				ULOG_ERRNO(
+				VDEC_LOG_ERRNO(
 					"unsupported format:"
 					" " VDEF_CODED_FORMAT_TO_STR_FMT,
 					-ret,
@@ -897,7 +1042,7 @@ int vdec_set_h265_ps(struct vdec_decoder *self,
 						    pps_size,
 						    format);
 		if (dbgret < 0)
-			ULOG_ERRNO("vdec_dbg_write_h264_ps", -dbgret);
+			VDEC_LOG_ERRNO("vdec_dbg_write_h264_ps", -dbgret);
 	}
 
 out:
@@ -909,7 +1054,7 @@ out:
 
 struct mbuf_pool *vdec_get_input_buffer_pool(struct vdec_decoder *self)
 {
-	ULOG_ERRNO_RETURN_VAL_IF(self == NULL, EINVAL, NULL);
+	VDEC_LOG_ERRNO_RETURN_VAL_IF(self == NULL, EINVAL, NULL);
 
 	return self->ops->get_input_buffer_pool(self);
 }
@@ -918,7 +1063,7 @@ struct mbuf_pool *vdec_get_input_buffer_pool(struct vdec_decoder *self)
 struct mbuf_coded_video_frame_queue *
 vdec_get_input_buffer_queue(struct vdec_decoder *self)
 {
-	ULOG_ERRNO_RETURN_VAL_IF(self == NULL, EINVAL, NULL);
+	VDEC_LOG_ERRNO_RETURN_VAL_IF(self == NULL, EINVAL, NULL);
 
 	return self->ops->get_input_buffer_queue(self);
 }
@@ -934,10 +1079,10 @@ int vdec_get_video_dimensions(struct vdec_decoder *self,
 			      unsigned int *crop_width,
 			      unsigned int *crop_height)
 {
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
 
 	if (!self->configured) {
-		ULOG_ERRNO("decoder is not configured", EAGAIN);
+		VDEC_LOG_ERRNO("decoder is not configured", EAGAIN);
 		return -EAGAIN;
 	}
 
@@ -964,7 +1109,7 @@ int vdec_get_video_dimensions(struct vdec_decoder *self,
 
 enum vdec_decoder_implem vdec_get_used_implem(struct vdec_decoder *self)
 {
-	ULOG_ERRNO_RETURN_VAL_IF(
+	VDEC_LOG_ERRNO_RETURN_VAL_IF(
 		self == NULL, EINVAL, VDEC_DECODER_IMPLEM_AUTO);
 
 	return self->config.implem;

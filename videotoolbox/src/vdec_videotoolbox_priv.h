@@ -69,22 +69,16 @@ struct vdec_videotoolbox {
 	struct pomp_evt *out_queue_evt;
 	CMVideoFormatDescriptionRef format_desc_ref;
 	VTDecompressionSessionRef decompress_ref;
-	atomic_bool flushing;
 
 	pthread_t thread;
 	bool thread_launched;
 	atomic_bool should_stop;
+	atomic_bool flush_required;
 	atomic_bool flush;
+	atomic_bool flushing;
 	atomic_bool flush_discard;
 	struct mbox *mbox;
-	bool need_sync;
-};
-
-
-struct vdec_videotoolbox_cvbuffer {
-	CVBufferRef ref;
-	CVPixelBufferLockFlags lock_flags;
-	bool cpu_locked;
+	atomic_bool need_sync;
 };
 
 #endif /* !_VDEC_VIDEOTOOLBOX_PRIV_H_ */

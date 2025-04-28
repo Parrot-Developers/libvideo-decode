@@ -30,6 +30,8 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <ulog.h>
@@ -54,10 +56,6 @@
 #	include <video-decode/vdec_mediacodec.h>
 #endif
 
-#ifdef BUILD_LIBVIDEO_DECODE_VIDEOCOREMMAL
-#	include <video-decode/vdec_videocoremmal.h>
-#endif
-
 #ifdef BUILD_LIBVIDEO_DECODE_VIDEOTOOLBOX
 #	include <video-decode/vdec_videotoolbox.h>
 #endif
@@ -76,6 +74,13 @@
 
 #ifdef BUILD_LIBVIDEO_DECODE_QCOM
 #	include <video-decode/vdec_qcom.h>
+#endif
+
+
+#if !defined(_WIN32)
+#	define VDEC_UNUSED __attribute__((unused))
+#else
+#	define VDEC_UNUSED
 #endif
 
 

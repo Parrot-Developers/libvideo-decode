@@ -24,71 +24,98 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VDEC_TURBOJPEG_PRIV_H_
-#define _VDEC_TURBOJPEG_PRIV_H_
+#ifndef _VDEC_MEDIACODEC_PRIV_H_
+#define _VDEC_MEDIACODEC_PRIV_H_
 
-#include <pthread.h>
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 
-#if defined(__APPLE__)
-#	include <TargetConditionals.h>
-#endif
+#include <pthread.h>
 
-#include <futils/futils.h>
-#include <libpomp.h>
+#include <media/NdkMediaCodec.h>
+#include <media/NdkMediaFormat.h>
 
-#include <media-buffers/mbuf_coded_video_frame.h>
-#include <media-buffers/mbuf_mem.h>
+#include <futils/timetools.h>
 #include <media-buffers/mbuf_mem_generic.h>
-#include <media-buffers/mbuf_raw_video_frame.h>
-
-#include <video-decode/vdec_core.h>
 #include <video-decode/vdec_internal.h>
-#include <video-decode/vdec_turbojpeg.h>
+#include <video-decode/vdec_mediacodec.h>
 
-#include <libyuv/convert_from.h>
 
-#include <turbojpeg.h>
+#define VDEC_ANCILLARY_KEY_MEDIACODEC_PTS "vdec.mediacodec.pts"
 
-#define VDEC_MSG_FLUSH 'f'
-#define VDEC_MSG_STOP 's'
-#define SOFTMPEG_MAX_PLANES 3
 
-static inline void xfree(void **ptr)
-{
-	if (ptr) {
-		free(*ptr);
-		*ptr = NULL;
-	}
-}
-
-struct vdec_turbojpeg {
-	struct vdec_decoder *base;
-
-	struct mbuf_coded_video_frame_queue *in_queue;
-	struct mbuf_raw_video_frame_queue *dec_out_queue;
-	struct pomp_evt *dec_out_queue_evt;
-	struct mbuf_pool *out_pool;
-	/* Specific: indicate that out_pool is external */
-	bool external_out_pool;
-	/* I420 to NV12 conversion memory for UV planes */
-	struct mbuf_mem *conv_mem;
-
-	tjhandle tj_handler;
-
-	struct vdef_raw_format output_format;
-
-	pthread_t thread;
-	bool thread_launched;
-	atomic_bool should_stop;
-	atomic_bool flushing;
-	atomic_bool flush_discard;
-	struct mbox *mbox;
-
-	struct pomp_evt *dec_error_evt;
-	atomic_int status;
+enum state {
+	RUNNING,
+	WAITING_FOR_STOP,
+	WAITING_FOR_FLUSH,
 };
 
 
-#endif /* !_VDEC_TURBOJPEG_PRIV_H_ */
+/* See
+ * https://developer.android.com/reference/android/media/MediaCodecInfo.CodecCapabilities.html
+ * for reference. */
+enum color_format {
+	YUV420_PLANAR = 0x00000013,
+	YUV420_PACKED_PLANAR = 0x00000014,
+	YUV420_SEMIPLANAR = 0x00000015,
+	YUV420_PACKED_SEMIPLANAR = 0x00000027,
+	TI_YUV420_PACKED_SEMIPLANAR = 0x7F000100,
+	QCOM_YUV420_SEMIPLANAR = 0x7FA30C00,
+	QCOM_YUV420_PACKED_SEMIPLANAR64X32_TILE2_M8KA = 0x7FA30C03,
+	QCOM_YUV420_SEMIPLANAR32_M = 0x7FA30C04,
+};
+
+
+struct vdec_mediacodec {
+	struct vdec_decoder *base;
+
+	AMediaCodec *mc;
+
+	atomic_int state;
+
+	struct mbuf_coded_video_frame_queue *in_queue;
+	struct mbuf_coded_video_frame_queue *meta_queue;
+	struct mbuf_raw_video_frame_queue *out_queue;
+	struct mbuf_mem *mem;
+	struct pomp_evt *out_evt;
+
+	char *dec_name;
+
+	struct {
+		pthread_t thread;
+		bool thread_created;
+		pthread_mutex_t mutex;
+		pthread_cond_t cond;
+		bool cond_signalled;
+		bool stop_requested;
+		bool flush_requested;
+		bool eos_requested;
+	} push;
+
+	struct {
+		pthread_t thread;
+		bool thread_created;
+		pthread_mutex_t mutex;
+		pthread_cond_t cond;
+		bool cond_signalled;
+		bool stop_requested;
+		bool flush_requested;
+		bool eos_requested;
+	} pull;
+
+	bool eos_requested;
+	bool eos_pending;
+
+	struct vdef_raw_format output_format;
+	unsigned int stride;
+	unsigned int slice_height;
+
+	atomic_bool need_sync;
+};
+
+
+/* Type conversion functions between Mediacodec & venc types */
+#include "vdec_mediacodec_convert.h"
+
+#endif /* !_VDEC_MEDIACODEC_PRIV_H_ */

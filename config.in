@@ -16,12 +16,6 @@
         help
             Enable the TurboJPEG implementation in libvideo-decode.
 
-    config VDEC_VIDEOCOREMMAL
-        bool "vdec videocoremmal implementation"
-            default false
-        help
-            Enable the VideoCore MMAL (RaspberryPi) implementation in libvideo-decode.
-
     config VDEC_VIDEOTOOLBOX
         bool "vdec videotoolbox implementation"
             default false

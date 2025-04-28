@@ -27,7 +27,13 @@
 #ifndef _VDEC_INTERNAL_H_
 #define _VDEC_INTERNAL_H_
 
-#include <stdatomic.h>
+#ifdef __cplusplus
+#	include <atomic>
+/* codecheck_ignore[SPACING] */
+using std::atomic_uint;
+#else
+#	include <stdatomic.h>
+#endif
 #include <stdio.h>
 
 #include <h264/h264.h>
@@ -48,6 +54,69 @@ extern "C" {
 #else /* !VDEC_API_EXPORTS */
 #	define VDEC_INTERNAL_API
 #endif /* !VDEC_API_EXPORTS */
+
+
+/* Specific logging functions : log the instance ID before the log message */
+#define VDEC_LOG_INT(_pri, _fmt, ...)                                          \
+	do {                                                                   \
+		char *prefix = (self != NULL && self->base != NULL)            \
+				       ? self->base->dec_name                  \
+				       : "";                                   \
+		ULOG_PRI(_pri,                                                 \
+			 "%s%s" _fmt,                                          \
+			 prefix != NULL ? prefix : "",                         \
+			 prefix != NULL ? ": " : "",                           \
+			 ##__VA_ARGS__);                                       \
+	} while (0)
+#define VDEC_LOGD(_fmt, ...) VDEC_LOG_INT(ULOG_DEBUG, _fmt, ##__VA_ARGS__)
+#define VDEC_LOGI(_fmt, ...) VDEC_LOG_INT(ULOG_INFO, _fmt, ##__VA_ARGS__)
+#define VDEC_LOGW(_fmt, ...) VDEC_LOG_INT(ULOG_WARN, _fmt, ##__VA_ARGS__)
+#define VDEC_LOGE(_fmt, ...) VDEC_LOG_INT(ULOG_ERR, _fmt, ##__VA_ARGS__)
+#define VDEC_LOG_ERRNO(_fmt, _err, ...)                                        \
+	do {                                                                   \
+		char *prefix = (self != NULL && self->base != NULL)            \
+				       ? self->base->dec_name                  \
+				       : "";                                   \
+		ULOGE_ERRNO((_err),                                            \
+			    "%s%s" _fmt,                                       \
+			    prefix != NULL ? prefix : "",                      \
+			    prefix != NULL ? ": " : "",                        \
+			    ##__VA_ARGS__);                                    \
+	} while (0)
+#define VDEC_LOGW_ERRNO(_fmt, _err, ...)                                       \
+	do {                                                                   \
+		char *prefix = (self != NULL && self->base != NULL)            \
+				       ? self->base->dec_name                  \
+				       : "";                                   \
+		ULOGW_ERRNO((_err),                                            \
+			    "%s%s" _fmt,                                       \
+			    prefix != NULL ? prefix : "",                      \
+			    prefix != NULL ? ": " : "",                        \
+			    ##__VA_ARGS__);                                    \
+	} while (0)
+#define VDEC_LOG_ERRNO_RETURN_IF(_cond, _err)                                  \
+	do {                                                                   \
+		if (ULOG_UNLIKELY(_cond)) {                                    \
+			VDEC_LOG_ERRNO("", (_err));                            \
+			return;                                                \
+		}                                                              \
+	} while (0)
+#define VDEC_LOG_ERRNO_RETURN_ERR_IF(_cond, _err)                              \
+	do {                                                                   \
+		if (ULOG_UNLIKELY(_cond)) {                                    \
+			int __pdraw_errno__err = (_err);                       \
+			VDEC_LOG_ERRNO("", (__pdraw_errno__err));              \
+			return -(__pdraw_errno__err);                          \
+		}                                                              \
+	} while (0)
+#define VDEC_LOG_ERRNO_RETURN_VAL_IF(_cond, _err, _val)                        \
+	do {                                                                   \
+		if (ULOG_UNLIKELY(_cond)) {                                    \
+			VDEC_LOG_ERRNO("", (_err));                            \
+			/* codecheck_ignore[RETURN_PARENTHESES] */             \
+			return (_val);                                         \
+		}                                                              \
+	} while (0)
 
 
 struct vdec_ops {
@@ -130,6 +199,8 @@ struct video_info {
 
 
 struct vdec_decoder {
+	/* Reserved */
+	struct vdec_decoder *base;
 	void *derived;
 	const struct vdec_ops *ops;
 	struct pomp_loop *loop;
@@ -138,6 +209,10 @@ struct vdec_decoder {
 	struct vdec_config config;
 	int configured;
 	struct video_info video_info;
+
+	int dec_id;
+	char *dec_name;
+
 	union {
 		struct h264_reader *h264;
 		struct h265_reader *h265;
@@ -150,6 +225,17 @@ struct vdec_decoder {
 		FILE *analysis;
 	} dbg;
 	atomic_uint_least64_t last_timestamp;
+
+	struct {
+		/* Frames that have passed the input filter */
+		atomic_uint in;
+		/* Frames that have been pushed to the decoder */
+		atomic_uint pushed;
+		/* Frames that have been pulled from the decoder */
+		atomic_uint pulled;
+		/* Frames that have been output (frame_output) */
+		atomic_uint out;
+	} counters;
 };
 
 
