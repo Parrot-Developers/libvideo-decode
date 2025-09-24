@@ -88,6 +88,7 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 
 		switch (message.type) {
 		case VDEC_VIDEOTOOLBOX_MESSAGE_TYPE_FLUSH:
+			atomic_store(&self->need_sync, 1);
 			err = pomp_loop_idle_add_with_cookie(
 				self->base->loop, call_flush_done, self, self);
 			if (err < 0)
@@ -118,6 +119,7 @@ static void out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 	int ret, err;
 	struct vdec_videotoolbox *self = userdata;
 	struct mbuf_raw_video_frame *frame;
+	struct vdef_raw_frame out_info = {};
 
 	do {
 		ret = mbuf_raw_video_frame_queue_pop(self->out_queue, &frame);
@@ -127,7 +129,19 @@ static void out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 			VDEC_LOG_ERRNO("mbuf_raw_video_frame_queue_pop", -ret);
 			return;
 		}
-		vdec_call_frame_output_cb(self->base, 0, frame);
+
+		if (!atomic_load(&self->flush_discard)) {
+			vdec_call_frame_output_cb(self->base, 0, frame);
+		} else {
+			err = mbuf_raw_video_frame_get_frame_info(frame,
+								  &out_info);
+			if (err < 0)
+				VDEC_LOG_ERRNO(
+					"mbuf_raw_video_frame_get_frame_info",
+					-err);
+			VDEC_LOGI("discarding frame %d", out_info.info.index);
+		}
+
 		err = mbuf_raw_video_frame_unref(frame);
 		if (err < 0)
 			VDEC_LOG_ERRNO("mbuf_raw_video_frame_unref", -err);
@@ -1220,11 +1234,10 @@ out:
 
 
 /* Called on the decoder thread */
-static void input_event_cb(struct pomp_evt *evt, void *userdata)
+static void check_input_queue(struct vdec_videotoolbox *self)
 {
 	int ret;
 	struct mbuf_coded_video_frame *frame;
-	struct vdec_videotoolbox *self = userdata;
 
 	ret = mbuf_coded_video_frame_queue_pop(self->in_queue, &frame);
 	while (ret == 0) {
@@ -1260,6 +1273,14 @@ flush:
 	ret = vdec_videotoolbox_do_flush(self);
 	if (ret < 0)
 		VDEC_LOG_ERRNO("vdec_videotoolbox_do_flush", -ret);
+}
+
+
+/* Called on the decoder thread */
+static void input_event_cb(struct pomp_evt *evt, void *userdata)
+{
+	struct vdec_videotoolbox *self = userdata;
+	check_input_queue(self);
 }
 
 
@@ -1335,7 +1356,8 @@ static void *vdec_videotoolbox_decoder_thread(void *ptr)
 			if (ret < 0)
 				VDEC_LOG_ERRNO("vdec_videotoolbox_do_flush",
 					       -ret);
-			continue;
+			/* Don't exit thread here, let the decoder check the
+			 * input queue and pop all frames to exit properly */
 		}
 
 		timeout = (atomic_load(&self->flush) &&
@@ -1351,6 +1373,8 @@ static void *vdec_videotoolbox_decoder_thread(void *ptr)
 				usleep(5000);
 			}
 			continue;
+		} else if (ret == -ETIMEDOUT) {
+			check_input_queue(self);
 		}
 	}
 

@@ -145,21 +145,31 @@ static void out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 {
 	struct vdec_ffmpeg *self = userdata;
 	struct mbuf_raw_video_frame *out_frame;
-	int ret;
+	int err;
 
 	do {
-		ret = mbuf_raw_video_frame_queue_pop(self->out_queue,
+		err = mbuf_raw_video_frame_queue_pop(self->out_queue,
 						     &out_frame);
-		if (ret == -EAGAIN) {
+		if (err == -EAGAIN) {
 			return;
-		} else if (ret < 0) {
+		} else if (err < 0) {
 			VDEC_LOG_ERRNO("mbuf_raw_video_frame_queue_pop:output",
-				       -ret);
+				       -err);
 			return;
 		}
-		vdec_call_frame_output_cb(self->base, 0, out_frame);
+		struct vdef_raw_frame out_info = {};
+		err = mbuf_raw_video_frame_get_frame_info(out_frame, &out_info);
+		if (err < 0)
+			VDEC_LOG_ERRNO("mbuf_raw_video_frame_get_frame_info",
+				       -err);
+
+		if (!atomic_load(&self->flush_discard))
+			vdec_call_frame_output_cb(self->base, 0, out_frame);
+		else
+			VDEC_LOGI("discarding frame %d", out_info.info.index);
+
 		mbuf_raw_video_frame_unref(out_frame);
-	} while (ret == 0);
+	} while (err == 0);
 }
 
 
@@ -464,6 +474,7 @@ static void vdec_ffmpeg_complete_flush(struct vdec_ffmpeg *self)
 
 	avcodec_flush_buffers(self->avcodec);
 	atomic_store(&self->flushing, 0);
+	atomic_store(&self->flush_discard, 0);
 
 	/* Call the flush callback on the loop */
 	char message = VDEC_MSG_FLUSH;

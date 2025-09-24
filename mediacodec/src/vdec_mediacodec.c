@@ -680,6 +680,8 @@ static void *push_routine(void *arg)
 			if (err == -EAGAIN) {
 				/* Retry later */
 				pthread_mutex_lock(&self->push.mutex);
+				if (self->push.eos_requested)
+					continue;
 				goto wait;
 			} else if (err < 0) {
 				VDEC_LOG_ERRNO("push_frame", -err);
@@ -1172,9 +1174,15 @@ static void *pull_routine(void *arg)
 			/* Note: pull_frame unrefs the frame */
 			int err = pull_frame(self, frame);
 			if (err == -EAGAIN) {
-				/* Retry later */
-				pthread_mutex_lock(&self->pull.mutex);
-				goto wait;
+				if (!self->pull.eos_requested) {
+					/* Retry later */
+					pthread_mutex_lock(&self->pull.mutex);
+					goto wait;
+				} else {
+					/* Retry now (EOS is requested) */
+					pthread_mutex_lock(&self->pull.mutex);
+					continue;
+				}
 			} else if (err < 0) {
 				VDEC_LOG_ERRNO("pull_frame", -err);
 			}

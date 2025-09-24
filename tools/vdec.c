@@ -128,6 +128,7 @@ struct vdec_prog {
 	struct mbuf_pool *in_pool;
 	int in_pool_allocated;
 	struct mbuf_coded_video_frame_queue *in_queue;
+	struct mbuf_coded_video_frame_queue *waiting_queue;
 	struct mbuf_mem *in_mem;
 	size_t in_mem_offset;
 	struct mbuf_coded_video_frame *in_frame;
@@ -149,6 +150,10 @@ struct vdec_prog {
 		double psnr_sum[3];
 	} psnr;
 	struct pmeta_data metadata;
+	int fake_live;
+	uint32_t fake_live_timer;
+	struct pomp_timer *queue_timer;
+	int waiting_for_frame;
 };
 
 
@@ -295,6 +300,16 @@ static int configure(struct vdec_prog *self)
 		}
 		self->framerate.num = info.framerate_num;
 		self->framerate.den = info.framerate_den * self->decimation;
+		if (self->fake_live && self->fake_live_timer == 0 &&
+		    self->framerate.num != 0) {
+			self->fake_live_timer = (self->framerate.den * 1000) /
+						self->framerate.num;
+			if (self->fake_live_timer < 1) {
+				ULOGW("framerate too small, defaulting to "
+				      "1000fps");
+				self->fake_live_timer = 1;
+			}
+		}
 		break;
 	}
 	case VDEF_ENCODING_H265: {
@@ -325,6 +340,16 @@ static int configure(struct vdec_prog *self)
 		}
 		self->framerate.num = info.framerate_num;
 		self->framerate.den = info.framerate_den * self->decimation;
+		if (self->fake_live && self->fake_live_timer == 0 &&
+		    self->framerate.num != 0) {
+			self->fake_live_timer = (self->framerate.den * 1000) /
+						self->framerate.num;
+			if (self->fake_live_timer < 1) {
+				ULOGW("framerate too small, defaulting to "
+				      "1000fps");
+				self->fake_live_timer = 1;
+			}
+		}
 		break;
 	}
 	case VDEF_ENCODING_MJPEG: {
@@ -417,10 +442,31 @@ static int au_decode(struct vdec_prog *self)
 		goto cleanup;
 	}
 
-	res = mbuf_coded_video_frame_queue_push(self->in_queue, self->in_frame);
-	if (res < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_push:input", -res);
-		goto cleanup;
+	if (self->fake_live) {
+		res = mbuf_coded_video_frame_queue_push(self->waiting_queue,
+							self->in_frame);
+		if (res < 0) {
+			ULOG_ERRNO(
+				"mbuf_coded_video_frame_queue_push:"
+				"waiting_queue",
+				-res);
+			goto cleanup;
+		}
+		if (self->waiting_for_frame) {
+			err = pomp_timer_set(self->queue_timer, 1);
+			if (err != 0)
+				ULOG_ERRNO("pomp_timer_set", -err);
+			else
+				self->waiting_for_frame = 0;
+		}
+	} else {
+		res = mbuf_coded_video_frame_queue_push(self->in_queue,
+							self->in_frame);
+		if (res < 0) {
+			ULOG_ERRNO("mbuf_coded_video_frame_queue_push:in_queue",
+				   -res);
+			goto cleanup;
+		}
 	}
 	len = mbuf_coded_video_frame_get_packed_size(self->in_frame);
 	if (len < 0)
@@ -1341,6 +1387,53 @@ static void au_parse_idle(void *userdata)
 }
 
 
+static void queue_timer_cb(struct pomp_timer *timer, void *userdata)
+{
+	struct vdec_prog *self = userdata;
+	int res, err;
+	struct mbuf_coded_video_frame *in_frame = NULL;
+
+	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_IF(!self->fake_live, EINVAL);
+
+	res = mbuf_coded_video_frame_queue_pop(self->waiting_queue, &in_frame);
+	if (res == -EAGAIN) {
+		ULOGW("frame not ready for decoding yet");
+		self->waiting_for_frame = 1;
+		return;
+	} else if (res < 0) {
+		ULOG_ERRNO("mbuf_coded_video_frame_queue_pop:waiting_queue",
+			   -res);
+		goto cleanup;
+	}
+
+	res = mbuf_coded_video_frame_queue_push(self->in_queue, in_frame);
+	if (res < 0) {
+		ULOG_ERRNO("mbuf_coded_video_frame_queue_push:in_queue", -res);
+		goto cleanup;
+	}
+
+cleanup:
+	if (in_frame != NULL) {
+		err = mbuf_coded_video_frame_unref(in_frame);
+		if (err < 0)
+			ULOG_ERRNO("mbuf_coded_video_frame_unref", -err);
+	}
+
+	if (!self->input_finished ||
+	    mbuf_coded_video_frame_queue_get_count(self->waiting_queue) > 0) {
+		res = pomp_timer_set(self->queue_timer, self->fake_live_timer);
+		if (res != 0)
+			ULOG_ERRNO("pomp_timer_set", -res);
+		return;
+	}
+
+	res = pomp_loop_idle_add(self->loop, &finish_idle, self);
+	if (res < 0)
+		ULOG_ERRNO("pomp_loop_idle_add", -res);
+}
+
+
 static void sig_handler(int signum)
 {
 	int res;
@@ -1368,7 +1461,7 @@ enum args_id {
 };
 
 
-static const char short_options[] = "hi:o:s:n:lj:d:";
+static const char short_options[] = ":hi:o:s:n:lj:L:d:";
 
 
 static const struct option long_options[] = {
@@ -1378,6 +1471,7 @@ static const struct option long_options[] = {
 	{"start", required_argument, NULL, 's'},
 	{"count", required_argument, NULL, 'n'},
 	{"low-delay", no_argument, NULL, 'l'},
+	{"fake-live", optional_argument, NULL, 'L'},
 	{"threads", required_argument, NULL, 'j'},
 	{"decimation", required_argument, NULL, 'd'},
 	{"psnr-src", required_argument, NULL, ARGS_ID_PSNR_SRC},
@@ -1412,6 +1506,9 @@ static void usage(char *prog_name)
 	       "Decode at most n frames\n"
 	       "  -l | --low-delay                   "
 	       "Favor low delay decoding\n"
+	       "  -L | --fake-live <num/den>         "
+	       "Fake live pipeline: schedule the "
+	       "decoder at the given framerate\n"
 	       "  -j | --threads <thread_count>      "
 	       "Preferred decoding thread count (0 = default,\n"
 	       "                                     "
@@ -1451,6 +1548,9 @@ int main(int argc, char **argv)
 	struct timespec cur_ts = {0, 0};
 	uint64_t start_time = 0, end_time = 0;
 	double bitrate = 0.;
+	long int num = 0;
+	long int den = 0;
+	struct vdef_frac frac = {};
 
 	s_self = NULL;
 	s_stopping = 0;
@@ -1499,6 +1599,11 @@ int main(int argc, char **argv)
 			goto out;
 
 		case 'i':
+			if ((optarg == NULL) || (optarg[0] == '-')) {
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
 			self->input_file = optarg;
 			if (is_suffix(".h265", self->input_file) ||
 			    is_suffix(".265", self->input_file) ||
@@ -1513,16 +1618,31 @@ int main(int argc, char **argv)
 			break;
 
 		case 'o':
+			if ((optarg == NULL) || (optarg[0] == '-')) {
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
 			self->output_file = optarg;
 			if (is_suffix(".y4m", self->output_file))
 				self->writer_cfg.y4m = 1;
 			break;
 
 		case 's':
+			if ((optarg == NULL) || (optarg[0] == '-')) {
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
 			self->start_index = atoi(optarg);
 			break;
 
 		case 'n':
+			if ((optarg == NULL) || (optarg[0] == '-')) {
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
 			self->max_count = atoi(optarg);
 			break;
 
@@ -1530,19 +1650,77 @@ int main(int argc, char **argv)
 			self->config.low_delay = 1;
 			break;
 
+		case 'L':
+			if (optarg[0] == '-') {
+				/* Hack to handle case when -L with no argument
+				 * is not the last option */
+				optind -= 1;
+				optarg = NULL;
+			}
+			self->fake_live = 1;
+
+			if (optarg == NULL) {
+				self->fake_live_timer = 0;
+				break;
+			}
+			res = sscanf(optarg, "%ld/%ld", &num, &den);
+			if (res != 2 || num <= 0 || den <= 0) {
+				ULOGE("invalid framerate (%ld/%ld)", num, den);
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
+			frac.num = num;
+			frac.den = den;
+			if (vdef_frac_is_null(&frac)) {
+				ULOGE("invalid framerate (%u/%u)",
+				      frac.num,
+				      frac.den);
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
+			self->fake_live_timer = (frac.den * 1000) / frac.num;
+			if (self->fake_live_timer < 1) {
+				ULOGW("framerate too small, defaulting to "
+				      "1000fps");
+				self->fake_live_timer = 1;
+			}
+			break;
+
 		case 'j':
+			if ((optarg == NULL) || (optarg[0] == '-')) {
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
 			self->config.preferred_thread_count = atoi(optarg);
 			break;
 
 		case 'd':
+			if ((optarg == NULL) || (optarg[0] == '-')) {
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
 			self->decimation = atoi(optarg);
 			break;
 
 		case ARGS_ID_PSNR_SRC:
+			if ((optarg == NULL) || (optarg[0] == '-')) {
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
 			self->psnr.src = optarg;
 			break;
 
 		case ARGS_ID_PSNR_SRC_FORMAT:
+			if ((optarg == NULL) || (optarg[0] == '-')) {
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
 			res = vdef_raw_format_from_str(optarg,
 						       &self->psnr.src_format);
 			if (res < 0) {
@@ -1553,12 +1731,37 @@ int main(int argc, char **argv)
 			break;
 
 		case ARGS_ID_PSNR_SRC_START:
+			if ((optarg == NULL) || (optarg[0] == '-')) {
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
 			self->psnr.start_index = atoi(optarg);
 			break;
 
 		case ARGS_ID_PSNR_CSV:
+			if ((optarg == NULL) || (optarg[0] == '-')) {
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
 			self->psnr.csv = optarg;
 			break;
+
+		case ':': {
+			switch (optopt) {
+			case 'L': {
+				self->fake_live = 1;
+				self->fake_live_timer = 0;
+				break;
+			}
+			default:
+				usage(argv[0]);
+				status = EXIT_FAILURE;
+				goto out;
+			}
+			break;
+		}
 
 		default:
 			usage(argv[0]);
@@ -1679,6 +1882,40 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
+	if (self->fake_live) {
+		res = mbuf_coded_video_frame_queue_new(&self->waiting_queue);
+		if (res < 0) {
+			ULOG_ERRNO("mbuf_coded_video_frame_queue_new", -res);
+			status = EXIT_FAILURE;
+			goto out;
+		}
+
+		self->queue_timer =
+			pomp_timer_new(self->loop, queue_timer_cb, self);
+		if (!self->queue_timer) {
+			ULOGE("pomp_timer_new failed");
+			status = EXIT_FAILURE;
+			goto out;
+		}
+
+		if (self->fake_live_timer == 0) {
+			res = pomp_timer_set(self->queue_timer, 1);
+			if (res != 0) {
+				ULOG_ERRNO("pomp_timer_set", -res);
+				status = EXIT_FAILURE;
+				goto out;
+			}
+		} else {
+			res = pomp_timer_set(self->queue_timer,
+					     self->fake_live_timer);
+			if (res != 0) {
+				ULOG_ERRNO("pomp_timer_set", -res);
+				status = EXIT_FAILURE;
+				goto out;
+			}
+		}
+	}
+
 	/* Start */
 	res = pomp_loop_idle_add(self->loop,
 				 (self->config.encoding == VDEF_ENCODING_MJPEG)
@@ -1796,10 +2033,31 @@ out:
 			if (res < 0)
 				ULOG_ERRNO("vdec_destroy", -res);
 		}
+		if (self->waiting_queue != NULL) {
+			res = mbuf_coded_video_frame_queue_flush(
+				self->waiting_queue);
+			if (res < 0)
+				ULOG_ERRNO("mbuf_coded_video_frame_queue_flush",
+					   -res);
+			res = mbuf_coded_video_frame_queue_destroy(
+				self->waiting_queue);
+			if (res < 0)
+				ULOG_ERRNO(
+					"mbuf_coded_video_frame_queue_destroy",
+					-res);
+		}
 		if (self->in_pool_allocated) {
 			res = mbuf_pool_destroy(self->in_pool);
 			if (res < 0)
 				ULOG_ERRNO("mbuf_pool_destroy:input", -res);
+		}
+		if (self->queue_timer != NULL) {
+			res = pomp_timer_clear(self->queue_timer);
+			if (res < 0)
+				ULOG_ERRNO("pomp_timer_clear", -res);
+			res = pomp_timer_destroy(self->queue_timer);
+			if (res < 0)
+				ULOG_ERRNO("pomp_timer_destroy", -res);
 		}
 		if (self->loop) {
 			res = pomp_loop_destroy(self->loop);
