@@ -141,7 +141,7 @@ out:
 
 
 bool vdec_is_sync_frame(struct mbuf_coded_video_frame *frame,
-			struct vdef_coded_frame *info)
+			const struct vdef_coded_frame *info)
 {
 	ULOG_ERRNO_RETURN_VAL_IF(frame == NULL, EINVAL, false);
 	ULOG_ERRNO_RETURN_VAL_IF(info == NULL, EINVAL, false);
@@ -293,7 +293,8 @@ int vdec_copy_coded_frame_as_metadata(struct mbuf_coded_video_frame *frame,
 				      struct mbuf_mem *mem,
 				      struct mbuf_coded_video_frame **ret_obj)
 {
-	int ret = 0, err;
+	int ret = 0;
+	int err;
 	struct vdef_coded_frame info;
 	struct vmeta_frame *metadata = NULL;
 	struct mbuf_coded_video_frame *meta_frame = NULL;
@@ -360,10 +361,10 @@ int vdec_copy_coded_frame_as_metadata(struct mbuf_coded_video_frame *frame,
 	*ret_obj = meta_frame;
 
 failure:
-	if ((ret < 0) && (meta_frame)) {
+	if ((ret < 0) && meta_frame) {
 		err = mbuf_coded_video_frame_unref(meta_frame);
 		if (err < 0)
-			ULOG_ERRNO("mbuf_coded_video_frame_unref", -ret);
+			ULOG_ERRNO("mbuf_coded_video_frame_unref", -err);
 	}
 
 	return ret;

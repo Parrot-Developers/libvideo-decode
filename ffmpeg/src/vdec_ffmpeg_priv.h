@@ -61,6 +61,7 @@ struct vdec_ffmpeg {
 	struct mbuf_raw_video_frame_queue *out_queue;
 	struct pomp_evt *out_queue_evt;
 	AVCodecContext *avcodec;
+	const AVCodec *codec;
 	AVBufferRef *hw_device_ctx;
 	AVPacket *avpacket;
 	AVFrame *dummy_frame;
@@ -73,6 +74,17 @@ struct vdec_ffmpeg {
 	atomic_int flush_discard;
 	struct mbox *mbox;
 	atomic_int need_sync;
+};
+
+
+struct vdec_ffmpeg_backend {
+	const enum vdef_encoding encoding;
+	const char *av_name;
+	const char *friendly_name;
+	bool is_hw;
+	const char *hw_device_name;
+	bool support_multi_threading;
+	bool is_supported;
 };
 
 #endif /* _VDEC_FFMPEG_PRIV_H_ */

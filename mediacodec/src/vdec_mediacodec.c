@@ -271,7 +271,8 @@ static int insert_grey_idr(struct vdec_mediacodec *self,
 			   struct vdef_coded_frame *frame_info,
 			   uint64_t *delta)
 {
-	int res = 0, err;
+	int res = 0;
+	int err;
 	size_t size;
 	struct mbuf_mem *idr_mem = NULL;
 	struct mbuf_coded_video_frame *idr_frame = NULL;
@@ -409,7 +410,8 @@ static int push_frame(struct vdec_mediacodec *self,
 	int err;
 	uint64_t delta;
 	struct timespec cur_ts = {0, 0};
-	uint64_t ts_us, ts;
+	uint64_t ts_us;
+	uint64_t ts;
 	int res = 0;
 	const void *frame_data = NULL;
 	size_t frame_len;
@@ -680,8 +682,12 @@ static void *push_routine(void *arg)
 			if (err == -EAGAIN) {
 				/* Retry later */
 				pthread_mutex_lock(&self->push.mutex);
+				/* If an EOS is pending, do not sleep:
+				 * push the EOS to the codec */
 				if (self->push.eos_requested)
 					continue;
+				/* No frames to push and no EOS: wait
+				 * for new frames from the queue */
 				goto wait;
 			} else if (err < 0) {
 				VDEC_LOG_ERRNO("push_frame", -err);
@@ -705,7 +711,7 @@ static void *push_routine(void *arg)
 			continue;
 		} else if (res == -EAGAIN && self->push.eos_requested) {
 			pthread_mutex_unlock(&self->push.mutex);
-			int err = push_eos(self);
+			err = push_eos(self);
 			if (err == 0)
 				self->push.eos_requested = false;
 			else if (err < 0 && err != -EAGAIN)
@@ -1172,17 +1178,17 @@ static void *pull_routine(void *arg)
 		if (res == 0) {
 			pthread_mutex_unlock(&self->pull.mutex);
 			/* Note: pull_frame unrefs the frame */
-			int err = pull_frame(self, frame);
+			err = pull_frame(self, frame);
 			if (err == -EAGAIN) {
-				if (!self->pull.eos_requested) {
-					/* Retry later */
-					pthread_mutex_lock(&self->pull.mutex);
-					goto wait;
-				} else {
-					/* Retry now (EOS is requested) */
-					pthread_mutex_lock(&self->pull.mutex);
+				/* Retry later */
+				pthread_mutex_lock(&self->pull.mutex);
+				/* If draining (EOS), do not sleep: loop
+				 * back to poll the codec */
+				if (self->pull.eos_requested)
 					continue;
-				}
+				/* Otherwise, wait for a new frame from
+				 * the push thread */
+				goto wait;
 			} else if (err < 0) {
 				VDEC_LOG_ERRNO("pull_frame", -err);
 			}
@@ -1679,6 +1685,9 @@ static int set_h265_ps(struct vdec_decoder *base,
 
 static struct mbuf_pool *get_input_buffer_pool(struct vdec_decoder *base)
 {
+	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
+
+	/* No input buffer pool allocated: use the application's */
 	return NULL;
 }
 

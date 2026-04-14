@@ -24,23 +24,124 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <futils/futils.h>
 #include <stdio.h>
+
+#if defined(__APPLE__)
+#	include <TargetConditionals.h>
+#endif
+
+#include "vdec_ffmpeg_priv.h"
 
 #define ULOG_TAG vdec_ffmpeg
 #include <ulog.h>
 ULOG_DECLARE_TAG(ULOG_TAG);
 
 
-#include "vdec_ffmpeg_priv.h"
+static inline const char *
+get_backend_name(const struct vdec_ffmpeg_backend *decoder)
+{
+	return decoder->friendly_name ? decoder->friendly_name
+				      : decoder->av_name;
+}
 
+
+static const uint8_t s_fake_ps_h264_1080p[] = {
+	0x00, 0x00, 0x01, 0xBA, 0x44, 0x02, 0xC4, 0x04, 0x04, 0x01, 0x89, 0xC3,
+	0x00, 0x00, 0x01, 0xBB, 0x00, 0x0C, 0x80, 0x0A, 0x31, 0x00, 0x00, 0x01,
+	0xE0, 0x07, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x01, 0xE0, 0x00, 0x40, 0x80,
+	0x80, 0x05, 0x21, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x67,
+	0x42, 0x00, 0x28, 0x96, 0x54, 0x05, 0x01, 0xED, 0x00, 0xF0, 0x88, 0x45,
+	0xA0, 0x00, 0x00, 0x00, 0x01, 0x68, 0xCE, 0x38, 0x80,
+};
+
+
+static const size_t s_fake_ps_h264_1080p_size = sizeof(s_fake_ps_h264_1080p);
+
+
+static const uint8_t s_fake_ps_h265_1080p[] = {
+	0x00, 0x00, 0x01, 0xBA, 0x44, 0x02, 0xC4, 0x04, 0x04, 0x01, 0x89, 0xC3,
+	0x00, 0x00, 0x01, 0xBB, 0x00, 0x0C, 0x80, 0x0A, 0x31, 0x00, 0x00, 0x01,
+	0xE0, 0x07, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x01, 0xE0, 0x00, 0x60, 0x80,
+	0x80, 0x05, 0x21, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x40,
+	0x01, 0x0C, 0x01, 0xFF, 0xFF, 0x01, 0x60, 0x00, 0x00, 0x00, 0x01, 0x42,
+	0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03,
+	0x00, 0x00, 0x03, 0x00, 0x3C, 0x60, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+	0x00, 0x01, 0x44, 0x01, 0xC0, 0xF1, 0x83, 0x20,
+};
+
+
+static const size_t s_fake_ps_h265_1080p_size = sizeof(s_fake_ps_h265_1080p);
+
+
+/* sorted by priority */
+static struct vdec_ffmpeg_backend s_backend_map[] = {
+	{
+		.encoding = VDEF_ENCODING_H264,
+		.av_name = "h264_nvmpi",
+		.friendly_name = NULL,
+		.is_hw = true,
+		.hw_device_name = NULL,
+		.support_multi_threading = false,
+		.is_supported = false,
+	},
+	{
+		.encoding = VDEF_ENCODING_H265,
+		.av_name = "hevc_nvmpi",
+		.friendly_name = NULL,
+		.is_hw = true,
+		.hw_device_name = NULL,
+		.support_multi_threading = false,
+		.is_supported = false,
+	},
+	{
+		.encoding = VDEF_ENCODING_H264,
+		.av_name = "h264",
+		.friendly_name = "h264_nvdec",
+		.is_hw = true,
+		.hw_device_name = "cuda",
+		.support_multi_threading = true,
+		.is_supported = false,
+	},
+	{
+		.encoding = VDEF_ENCODING_H265,
+		.av_name = "hevc",
+		.friendly_name = "hevc_nvdec",
+		.is_hw = true,
+		.hw_device_name = "cuda",
+		.support_multi_threading = true,
+		.is_supported = false,
+	},
+	{
+		.encoding = VDEF_ENCODING_H264,
+		.av_name = "h264",
+		.friendly_name = NULL,
+		.is_hw = false,
+		.hw_device_name = NULL,
+		.support_multi_threading = true,
+		.is_supported = false,
+	},
+	{
+		.encoding = VDEF_ENCODING_H265,
+		.av_name = "hevc",
+		.friendly_name = NULL,
+		.is_hw = false,
+		.hw_device_name = NULL,
+		.support_multi_threading = true,
+		.is_supported = false,
+	},
+};
+
+static void initialize_supported_backends(void);
 
 static struct vdef_coded_format
 	supported_formats[VDEC_FFMPEG_NB_SUPPORTED_FORMATS];
 static pthread_once_t supported_formats_is_init = PTHREAD_ONCE_INIT;
-static void initialize_supported_formats(void)
+static void initialize_supported_formats_and_backends(void)
 {
 	supported_formats[0] = vdef_h264_byte_stream;
 	supported_formats[1] = vdef_h265_byte_stream;
+	initialize_supported_backends();
 }
 
 
@@ -68,6 +169,8 @@ static int av_to_ulog_level(int level)
 
 static void av_log_cb(void *avcl, int level, const char *fmt, va_list vl)
 {
+	UNUSED(avcl);
+
 	char *str = NULL;
 	int l = av_to_ulog_level(level);
 	if (l == 0)
@@ -105,7 +208,8 @@ static void call_stop_done(void *userdata)
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct vdec_ffmpeg *self = userdata;
-	int ret, err;
+	int ret;
+	int err;
 	char message;
 
 	do {
@@ -206,6 +310,9 @@ format_from_av_pixel_format(enum AVPixelFormat format)
 static void
 vdec_ffmpeg_avframe_mbuf_free(void *data, size_t len, void *userdata)
 {
+	UNUSED(data);
+	UNUSED(len);
+
 	AVFrame *frame = userdata;
 	av_frame_free(&frame);
 }
@@ -217,7 +324,8 @@ vdec_ffmpeg_set_frame_metadata(struct vdec_ffmpeg *self,
 			       struct mbuf_raw_video_frame **out_frame,
 			       AVFrame *frame)
 {
-	int ret = 0, err;
+	int ret = 0;
+	int err;
 	struct timespec cur_ts = {0, 0};
 	uint64_t ts_us;
 	uint8_t *base;
@@ -534,9 +642,10 @@ static int vdec_ffmpeg_start_flush(struct vdec_ffmpeg *self)
 }
 
 
-static int vdec_ffmpeg_insert_grey_idr(struct vdec_ffmpeg *self,
-				       struct vdef_coded_frame *in_frame_info,
-				       uint64_t *delta)
+static int
+vdec_ffmpeg_insert_grey_idr(struct vdec_ffmpeg *self,
+			    const struct vdef_coded_frame *in_frame_info,
+			    uint64_t *delta)
 {
 	int ret;
 	struct mbuf_mem *idr_mem = NULL;
@@ -623,7 +732,8 @@ out:
 static int vdec_ffmpeg_buffer_push_one(struct vdec_ffmpeg *self,
 				       struct mbuf_coded_video_frame *in_frame)
 {
-	int ret = 0, err;
+	int ret = 0;
+	int err;
 	struct vdef_coded_frame in_info;
 	struct timespec cur_ts = {0, 0};
 	uint64_t delta = 0;
@@ -752,7 +862,8 @@ static void release_decoder_frame(struct mbuf_coded_video_frame *frame)
 
 static int vdec_ffmpeg_discard_frame(struct vdec_ffmpeg *self)
 {
-	int ret, avcodec_ret;
+	int ret;
+	int avcodec_ret;
 	struct mbuf_coded_video_frame *in_frame = NULL;
 	struct vdef_coded_frame in_info;
 
@@ -803,7 +914,9 @@ static int vdec_ffmpeg_discard_frame(struct vdec_ffmpeg *self)
 
 static int vdec_ffmpeg_buffer_pop_all(struct vdec_ffmpeg *self)
 {
-	int ret = 0, err, avcodec_ret;
+	int ret = 0;
+	int err;
+	int avcodec_ret;
 	AVFrame *frame;
 	struct mbuf_coded_video_frame *in_frame = NULL;
 	struct mbuf_raw_video_frame *out_frame = NULL;
@@ -983,7 +1096,13 @@ static void *vdec_ffmpeg_decoder_thread(void *ptr)
 	int timeout;
 	char message;
 
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+	ret = pthread_setname_np("vdec_ffmpeg");
+#elif !defined(__APPLE__)
 	ret = pthread_setname_np(pthread_self(), "vdec_ffmpeg");
+#else
+	ret = 0;
+#endif
 	if (ret != 0)
 		VDEC_LOG_ERRNO("pthread_setname_np", ret);
 
@@ -1058,7 +1177,7 @@ exit:
 static int get_supported_input_formats(const struct vdef_coded_format **formats)
 {
 	(void)pthread_once(&supported_formats_is_init,
-			   initialize_supported_formats);
+			   initialize_supported_formats_and_backends);
 	*formats = supported_formats;
 	return VDEC_FFMPEG_NB_SUPPORTED_FORMATS;
 }
@@ -1187,75 +1306,109 @@ static bool input_filter(struct mbuf_coded_video_frame *frame, void *userdata)
 }
 
 
-static int create(struct vdec_decoder *base)
+static int set_hardware_device(struct vdec_ffmpeg *self,
+			       const struct vdec_ffmpeg_backend *decoder,
+			       const AVCodec *codec,
+			       enum AVHWDeviceType *hw_type,
+			       enum AVPixelFormat *pix_fmt)
+{
+	const AVCodecHWConfig *config;
+
+	if ((codec == NULL) || (hw_type == NULL) || (pix_fmt == NULL))
+		return -EINVAL;
+
+	if (decoder->hw_device_name == NULL)
+		return 0;
+
+	*hw_type = av_hwdevice_find_type_by_name(decoder->hw_device_name);
+	if (*hw_type != AV_HWDEVICE_TYPE_NONE) {
+		bool found = false;
+		for (size_t j = 0;; j++) {
+			config = avcodec_get_hw_config(codec, j);
+			if (config == NULL)
+				break;
+			if (config->methods &
+				    AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
+			    config->device_type == *hw_type) {
+				found = true;
+				*pix_fmt = config->pix_fmt;
+				break;
+			}
+		}
+		if (!found) {
+			if (self != NULL) {
+				VDEC_LOGI("no config found for device type %s",
+					  av_hwdevice_get_type_name(*hw_type));
+			}
+			*hw_type = AV_HWDEVICE_TYPE_NONE;
+			return -ENOENT;
+		}
+
+		return 0;
+	}
+
+	return -ENOENT;
+}
+
+
+static int initialize_backend(struct vdec_ffmpeg *self)
 {
 	int ret = 0;
-	struct vdec_ffmpeg *self = NULL;
-	unsigned int ver = avcodec_version();
-	const AVCodec *codec;
+	int err = 0;
+	enum vdef_encoding encoding = self->base->config.encoding;
+	const AVCodec *codec = NULL;
 	enum AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_NONE;
 	enum AVPixelFormat pix_fmt = AV_PIX_FMT_YUV420P;
-	struct mbuf_coded_video_frame_queue_args queue_args = {
-		.filter = input_filter,
-	};
+	unsigned int ver = avcodec_version();
+	bool support_multi_threading = true;
 
-	VDEC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+	for (size_t i = 0; i < SIZEOF_ARRAY(s_backend_map); i++) {
+		const struct vdec_ffmpeg_backend *decoder = &s_backend_map[i];
 
-	(void)pthread_once(&supported_formats_is_init,
-			   initialize_supported_formats);
+		if (!decoder->is_supported)
+			continue;
 
-	self = calloc(1, sizeof(*self));
-	if (self == NULL)
-		return -ENOMEM;
-	self->base = base;
-	base->derived = self;
-	queue_args.filter_userdata = self;
+		if (encoding != decoder->encoding)
+			continue;
 
-	/* Find the decoder */
-	av_log_set_level(AV_LOG_VERBOSE);
-	av_log_set_callback(&av_log_cb);
+		codec = avcodec_find_decoder_by_name(decoder->av_name);
+		if (codec == NULL)
+			continue;
 
-	switch (base->config.encoding) {
-	case VDEF_ENCODING_H264:
-		atomic_store(&self->need_sync, 1);
-		codec = avcodec_find_decoder(AV_CODEC_ID_H264);
-		break;
-	case VDEF_ENCODING_H265:
-		codec = avcodec_find_decoder(AV_CODEC_ID_HEVC);
-		break;
-	default:
-		codec = NULL;
+		if (decoder->hw_device_name != NULL) {
+			err = set_hardware_device(
+				self, decoder, codec, &hw_type, &pix_fmt);
+			if (err < 0)
+				continue;
+		}
+
+		const char *hw_name =
+			(hw_type != AV_HWDEVICE_TYPE_NONE)
+				? av_hwdevice_get_type_name(hw_type)
+				: "none";
+		const char *decoder_name = (decoder->friendly_name != NULL)
+						   ? decoder->friendly_name
+						   : decoder->av_name;
+		VDEC_LOGI(
+			"ffmpeg implementation - libavcodec version=%u.%u.%u "
+			"decoding %s - using %s decoder (hw-device: %s)",
+			(ver >> 16) & 0xFF,
+			(ver >> 8) & 0xFF,
+			ver & 0xFF,
+			vdef_encoding_to_str(encoding),
+			decoder_name,
+			hw_name);
+
+		self->codec = codec;
+		support_multi_threading = decoder->support_multi_threading;
+
 		break;
 	}
 
 	if (codec == NULL) {
 		ret = -ENOENT;
 		VDEC_LOG_ERRNO("codec not found", -ret);
-		goto error;
-	}
-
-	/* Optional NVDEC HW decoding support (still called CUDA by ffmpeg) */
-	hw_type = av_hwdevice_find_type_by_name("cuda");
-	if (hw_type != AV_HWDEVICE_TYPE_NONE) {
-		bool found = false;
-		for (int i = 0;; i++) {
-			const AVCodecHWConfig *config =
-				avcodec_get_hw_config(codec, i);
-			if (config == NULL)
-				break;
-			if (config->methods &
-				    AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
-			    config->device_type == hw_type) {
-				found = true;
-				pix_fmt = config->pix_fmt;
-				break;
-			}
-		}
-		if (!found) {
-			VDEC_LOGI("no config found for device type %s",
-				  av_hwdevice_get_type_name(hw_type));
-			hw_type = AV_HWDEVICE_TYPE_NONE;
-		}
+		return ret;
 	}
 
 	/* Initialize the decoder */
@@ -1263,7 +1416,7 @@ static int create(struct vdec_decoder *base)
 	if (self->avcodec == NULL) {
 		ret = -ENOMEM;
 		VDEC_LOG_ERRNO("avcodec_alloc_context3", -ret);
-		goto error;
+		return ret;
 	}
 
 	self->avcodec->pix_fmt = pix_fmt;
@@ -1275,9 +1428,9 @@ static int create(struct vdec_decoder *base)
 	self->avcodec->codec_type = AVMEDIA_TYPE_VIDEO;
 	self->avcodec->skip_idct = AVDISCARD_DEFAULT;
 	self->avcodec->thread_type = FF_THREAD_SLICE;
-	if (!base->config.low_delay)
+	if (!self->base->config.low_delay)
 		self->avcodec->thread_type |= FF_THREAD_FRAME;
-	switch (base->config.preferred_thread_count) {
+	switch (self->base->config.preferred_thread_count) {
 	case 1:
 		self->avcodec->thread_count = 1;
 		self->avcodec->thread_type &= ~FF_THREAD_FRAME;
@@ -1287,8 +1440,13 @@ static int create(struct vdec_decoder *base)
 		break;
 	default:
 		self->avcodec->thread_count =
-			base->config.preferred_thread_count;
+			self->base->config.preferred_thread_count;
 		break;
+	}
+
+	if (!support_multi_threading) {
+		self->avcodec->thread_count = 1;
+		self->avcodec->thread_type &= ~FF_THREAD_FRAME;
 	}
 
 	if (hw_type != AV_HWDEVICE_TYPE_NONE) {
@@ -1310,14 +1468,145 @@ static int create(struct vdec_decoder *base)
 		}
 	}
 
-	VDEC_LOGI(
-		"ffmpeg implementation - "
-		"libavcodec version=%u.%u.%u - using %s %s decoding",
-		(ver >> 16) & 0xFF,
-		(ver >> 8) & 0xFF,
-		ver & 0xFF,
-		vdef_encoding_to_str(base->config.encoding),
-		(hw_type != AV_HWDEVICE_TYPE_NONE) ? "NVDEC HW" : "CPU");
+	return ret;
+}
+
+
+static int setup_codec_extradata(AVCodecContext *avctx,
+				 const struct vdec_ffmpeg_backend *backend)
+{
+	if (backend->encoding == VDEF_ENCODING_H264) {
+		avctx->extradata = av_malloc(s_fake_ps_h264_1080p_size +
+					     AV_INPUT_BUFFER_PADDING_SIZE);
+		memcpy(avctx->extradata,
+		       s_fake_ps_h264_1080p,
+		       s_fake_ps_h264_1080p_size);
+		avctx->extradata_size = s_fake_ps_h264_1080p_size;
+	} else if (backend->encoding == VDEF_ENCODING_H265) {
+		avctx->extradata = av_malloc(s_fake_ps_h265_1080p_size +
+					     AV_INPUT_BUFFER_PADDING_SIZE);
+		memcpy(avctx->extradata,
+		       s_fake_ps_h265_1080p,
+		       s_fake_ps_h265_1080p_size);
+		avctx->extradata_size = s_fake_ps_h265_1080p_size;
+	} else {
+		ULOGE("unsupported encoding %d", backend->encoding);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+
+static bool backend_is_viable(const struct vdec_ffmpeg_backend *backend)
+{
+	int err = 0;
+	AVCodecContext *avctx = NULL;
+	AVBufferRef *hwDeviceCtx = NULL;
+	bool supported = false;
+	enum AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_NONE;
+	enum AVPixelFormat pix_fmt = AV_PIX_FMT_YUV420P;
+
+	const AVCodec *codec = avcodec_find_decoder_by_name(backend->av_name);
+	if (!codec)
+		goto cleanup;
+
+	if (backend->hw_device_name != NULL) {
+		err = set_hardware_device(
+			NULL, backend, codec, &hw_type, &pix_fmt);
+		if (err < 0)
+			goto cleanup;
+	}
+
+	if (hw_type != AV_HWDEVICE_TYPE_NONE) {
+		err = av_hwdevice_ctx_create(
+			&hwDeviceCtx, hw_type, NULL, NULL, 0);
+		if (err < 0)
+			goto cleanup;
+	}
+
+	avctx = avcodec_alloc_context3(codec);
+	if (!avctx)
+		goto cleanup;
+
+	avctx->pix_fmt = pix_fmt;
+	avctx->skip_frame = AVDISCARD_DEFAULT;
+	avctx->error_concealment =
+		FF_EC_GUESS_MVS | FF_EC_DEBLOCK | FF_EC_FAVOR_INTER;
+	avctx->skip_loop_filter = AVDISCARD_DEFAULT;
+	avctx->workaround_bugs = FF_BUG_AUTODETECT;
+	avctx->codec_type = AVMEDIA_TYPE_VIDEO;
+	avctx->skip_idct = AVDISCARD_DEFAULT;
+	avctx->thread_count = 1;
+	avctx->thread_type = FF_THREAD_SLICE;
+	if (!backend->support_multi_threading)
+		avctx->thread_type = 0;
+
+	avctx->width = 1920;
+	avctx->height = 1080;
+
+	if (setup_codec_extradata(avctx, backend) < 0)
+		goto cleanup;
+
+	if (avcodec_open2(avctx, codec, NULL) >= 0)
+		supported = true;
+
+cleanup:
+	if (avctx)
+		avcodec_free_context(&avctx);
+	if (hwDeviceCtx)
+		av_buffer_unref(&hwDeviceCtx);
+	return supported;
+}
+
+
+static void initialize_supported_backends(void)
+{
+	av_log_set_level(AV_LOG_QUIET);
+
+	for (size_t i = 0; i < SIZEOF_ARRAY(s_backend_map); i++) {
+		struct vdec_ffmpeg_backend *backend = &s_backend_map[i];
+
+		backend->is_supported = backend_is_viable(backend);
+
+		ULOGD("decoder %s is %ssupported",
+		      get_backend_name(backend),
+		      backend->is_supported ? "" : "un");
+	}
+
+	av_log_set_level(AV_LOG_VERBOSE);
+}
+
+
+static int create(struct vdec_decoder *base)
+{
+	int ret = 0;
+	struct vdec_ffmpeg *self = NULL;
+	struct mbuf_coded_video_frame_queue_args queue_args = {
+		.filter = input_filter,
+	};
+
+	VDEC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+
+	(void)pthread_once(&supported_formats_is_init,
+			   initialize_supported_formats_and_backends);
+
+	self = calloc(1, sizeof(*self));
+	if (self == NULL)
+		return -ENOMEM;
+	self->base = base;
+	base->derived = self;
+	queue_args.filter_userdata = self;
+
+	/* Find the decoder */
+	av_log_set_level(AV_LOG_VERBOSE);
+	av_log_set_callback(&av_log_cb);
+
+	ret = initialize_backend(self);
+	if (ret < 0) {
+		VDEC_LOG_ERRNO("initialize_backend", -ret);
+		goto error;
+	}
 
 	self->avpacket = av_packet_alloc();
 	if (self->avpacket == NULL) {
@@ -1449,10 +1738,12 @@ static int set_ps(struct vdec_decoder *base,
 		off += size_table[i] - offset;
 	}
 
+	self->avcodec->width = base->video_info.resolution.width;
+	self->avcodec->height = base->video_info.resolution.height;
 	self->avcodec->extradata = data;
 	self->avcodec->extradata_size = size;
 
-	int ret = avcodec_open2(self->avcodec, NULL, NULL);
+	int ret = avcodec_open2(self->avcodec, self->codec, NULL);
 	if (ret < 0) {
 		VDEC_LOG_ERRNO("avcodec_open2", -ret);
 		return ret;
@@ -1503,10 +1794,7 @@ static int set_h265_ps(struct vdec_decoder *base,
 
 static struct mbuf_pool *get_input_buffer_pool(struct vdec_decoder *base)
 {
-	struct vdec_ffmpeg *self = NULL;
-
-	VDEC_LOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
-	self = base->derived;
+	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
 
 	/* No input buffer pool allocated: use the application's */
 	return NULL;

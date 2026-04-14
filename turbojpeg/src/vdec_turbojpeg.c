@@ -58,8 +58,12 @@ static void call_stop_done(void *userdata)
 
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
+	UNUSED(fd);
+	UNUSED(revents);
+
 	struct vdec_turbojpeg *self = userdata;
-	int ret, err;
+	int ret;
+	int err;
 	char message;
 
 	do {
@@ -97,6 +101,8 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 
 static void dec_error_evt_cb(struct pomp_evt *evt, void *userdata)
 {
+	UNUSED(evt);
+
 	struct vdec_turbojpeg *self = userdata;
 	int status = atomic_exchange(&self->status, 0);
 
@@ -106,6 +112,8 @@ static void dec_error_evt_cb(struct pomp_evt *evt, void *userdata)
 
 static void dec_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 {
+	UNUSED(evt);
+
 	struct vdec_turbojpeg *self = userdata;
 	struct mbuf_raw_video_frame *out_frame = NULL;
 	int ret;
@@ -143,7 +151,6 @@ static int decode_frame(struct vdec_turbojpeg *self,
 	void *mem_data = NULL;
 	size_t mem_data_size = 0;
 	size_t conv_mem_size = 0;
-	unsigned int i;
 
 	if (!in_frame)
 		return 0;
@@ -205,7 +212,8 @@ static int decode_frame(struct vdec_turbojpeg *self,
 		goto out;
 	}
 
-	for (i = 0; i < vdef_get_raw_frame_plane_count(&self->output_format);
+	for (unsigned int i = 0;
+	     i < vdef_get_raw_frame_plane_count(&self->output_format);
 	     i++) {
 		plane_data[i] = (unsigned char *)mem_data + offset;
 		offset += plane_size[i];
@@ -452,7 +460,8 @@ static int complete_flush(struct vdec_turbojpeg *self)
 
 static void check_input_queue(struct vdec_turbojpeg *self)
 {
-	int ret, err = 0;
+	int ret;
+	int err = 0;
 	struct mbuf_coded_video_frame *in_frame;
 
 	ret = mbuf_coded_video_frame_queue_peek(self->in_queue, &in_frame);
@@ -521,7 +530,8 @@ static void input_event_cb(struct pomp_evt *evt, void *userdata)
 
 static void *decoder_thread(void *ptr)
 {
-	int ret, timeout;
+	int ret;
+	int timeout;
 	struct vdec_turbojpeg *self = ptr;
 	struct pomp_loop *loop = NULL;
 	struct pomp_evt *in_queue_evt = NULL;
@@ -915,6 +925,8 @@ error:
 
 static struct mbuf_pool *get_input_buffer_pool(struct vdec_decoder *base)
 {
+	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
+
 	/* No input buffer pool allocated: use the application's */
 	return NULL;
 }

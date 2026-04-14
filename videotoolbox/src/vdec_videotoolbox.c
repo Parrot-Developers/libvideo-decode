@@ -74,7 +74,8 @@ static void decoder_error(struct vdec_videotoolbox *self, int error)
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct vdec_videotoolbox *self = userdata;
-	int ret, err;
+	int ret;
+	int err;
 	struct vdec_videotoolbox_message message;
 
 	do {
@@ -116,7 +117,8 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 /* Called on the loop thread */
 static void out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 {
-	int ret, err;
+	int ret;
+	int err;
 	struct vdec_videotoolbox *self = userdata;
 	struct mbuf_raw_video_frame *frame;
 	struct vdef_raw_frame out_info = {};
@@ -157,7 +159,8 @@ static CFDataRef vdec_videotoolbox_avcc_create(const uint8_t *sps,
 {
 	CFDataRef data_ref = NULL;
 	uint8_t *data = NULL;
-	size_t size = 0, offset = 0;
+	size_t size = 0;
+	size_t offset = 0;
 
 	size = 8 + sps_size + 3 + pps_size;
 	data = malloc(size);
@@ -200,7 +203,8 @@ static CFDataRef vdec_videotoolbox_hvcc_create(const uint8_t *vps,
 {
 	CFDataRef data_ref = NULL;
 	uint8_t *data = NULL;
-	size_t size = 0, offset = 0;
+	size_t size = 0;
+	size_t offset = 0;
 	uint8_t version = 1;
 	uint8_t general_profile_space = 0;
 	uint8_t general_tier_flag = 0;
@@ -301,7 +305,8 @@ vdec_videotoolbox_decoder_config_create(const uint8_t *vps,
 					enum vdef_encoding video_codec)
 {
 	int err = 0;
-	CFMutableDictionaryRef decoder_config = NULL, codec_config = NULL;
+	CFMutableDictionaryRef decoder_config = NULL;
+	CFMutableDictionaryRef codec_config = NULL;
 	CFDataRef codec_data = NULL;
 
 	decoder_config =
@@ -381,8 +386,11 @@ vdec_videotoolbox_buffer_attr_create(unsigned int width,
 				     int full_range)
 {
 	int err = 0;
-	CFMutableDictionaryRef buffer_attr = NULL, io_surface_properties = NULL;
-	CFNumberRef w = NULL, h = NULL, pix_fmt = NULL;
+	CFMutableDictionaryRef buffer_attr = NULL;
+	CFMutableDictionaryRef io_surface_properties = NULL;
+	CFNumberRef w = NULL;
+	CFNumberRef h = NULL;
+	CFNumberRef pix_fmt = NULL;
 	int fmt = full_range ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
 			     : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
 
@@ -514,6 +522,7 @@ static int vdec_videotoolbox_do_flush(struct vdec_videotoolbox *self)
 		VDEC_LOG_ERRNO("mbox_push", -ret);
 
 	atomic_store(&self->flush, false);
+	atomic_store(&self->flush_discard, false);
 
 	return 0;
 }
@@ -537,7 +546,8 @@ vdec_videotoolbox_set_frame_metadata(struct vdec_videotoolbox *self,
 				     struct mbuf_raw_video_frame **out_frame,
 				     CVPixelBufferRef pixel_buffer_ref)
 {
-	int ret = 0, err;
+	int ret = 0;
+	int err;
 	struct timespec cur_ts = {0, 0};
 	uint64_t ts_us;
 	OSType pixel_format;
@@ -759,7 +769,8 @@ vdec_videotoolbox_insert_grey_idr(struct vdec_videotoolbox *self,
 				  struct vdef_coded_frame *in_frame_info,
 				  uint64_t *delta)
 {
-	int ret, err;
+	int ret;
+	int err;
 	struct mbuf_mem *idr_mem = NULL;
 	struct mbuf_coded_video_frame *idr_frame = NULL;
 	uint64_t timestamp;
@@ -910,7 +921,8 @@ static int
 vdec_videotoolbox_buffer_push_one(struct vdec_videotoolbox *self,
 				  struct mbuf_coded_video_frame *in_frame)
 {
-	int ret = 0, err;
+	int ret = 0;
+	int err;
 	struct vdef_coded_frame in_info;
 	struct timespec cur_ts = {0, 0};
 	uint64_t delta = 0;
@@ -1101,7 +1113,8 @@ static void vdec_videotoolbox_frame_output_cb(void *decompress_output_ref_con,
 					      CMTime presentation_timestamp,
 					      CMTime presentation_duration)
 {
-	int ret, err;
+	int ret;
+	int err;
 	struct vdec_videotoolbox *self =
 		(struct vdec_videotoolbox *)decompress_output_ref_con;
 	struct mbuf_coded_video_frame *in_frame = source_frame_ref_con;
@@ -1682,7 +1695,8 @@ static int set_ps(struct vdec_decoder *base,
 	const uint8_t *vps_tmp = NULL;
 	size_t vps_size_tmp = 0;
 	OSStatus osstatus;
-	CFMutableDictionaryRef decoder_config = NULL, buffer_attr = NULL;
+	CFMutableDictionaryRef decoder_config = NULL;
+	CFMutableDictionaryRef buffer_attr = NULL;
 	VTDecompressionOutputCallbackRecord cb;
 	CMVideoCodecType codec_type;
 
@@ -1825,10 +1839,7 @@ static int set_h265_ps(struct vdec_decoder *base,
 /* Called on the loop thread */
 static struct mbuf_pool *get_input_buffer_pool(struct vdec_decoder *base)
 {
-	struct vdec_videotoolbox *self = NULL;
-
-	VDEC_LOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
-	self = base->derived;
+	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
 
 	/* No input buffer pool allocated: use the application's */
 	return NULL;

@@ -72,6 +72,9 @@ static inline const char *strsignal(int signum)
 #endif /* _WIN32 */
 
 
+#define UNUSED(x) (void)(x)
+
+
 #define DEFAULT_IN_BUF_COUNT 10
 #define DEFAULT_IN_BUF_CAPACITY (3840 * 2160 * 3 / 4)
 #define DEFAULT_MJPEG_IN_BUF_CAPACITY (8000 * 6000 * 3 / 4)
@@ -273,7 +276,8 @@ error:
 
 static int configure(struct vdec_prog *self)
 {
-	int res, buf_count;
+	int res;
+	int buf_count;
 	size_t mem_size;
 
 	switch (self->config.encoding) {
@@ -425,7 +429,8 @@ static int configure(struct vdec_prog *self)
 
 static int au_decode(struct vdec_prog *self)
 {
-	int res = 0, err;
+	int res = 0;
+	int err;
 	ssize_t len;
 
 	if (self->in_frame == NULL)
@@ -500,9 +505,11 @@ static int append_to_frame(struct vdec_prog *self,
 			   union nalu_type type)
 {
 	int res;
-	size_t au_offset, capacity;
+	size_t au_offset;
+	size_t capacity;
 	size_t nalu_offset;
-	uint8_t *au_data, *nalu_data;
+	uint8_t *au_data;
+	uint8_t *nalu_data;
 	uint32_t start;
 
 	ULOG_ERRNO_RETURN_ERR_IF(frame == NULL, EINVAL);
@@ -599,6 +606,8 @@ static int au_end(struct vdec_prog *self)
 
 static void h264_au_end_cb(struct h264_ctx *ctx, void *userdata)
 {
+	UNUSED(ctx);
+
 	struct vdec_prog *self = userdata;
 	int res = au_end(userdata);
 	if (res < 0) {
@@ -611,6 +620,8 @@ static void h264_au_end_cb(struct h264_ctx *ctx, void *userdata)
 
 static void h265_au_end_cb(struct h265_ctx *ctx, void *userdata)
 {
+	UNUSED(ctx);
+
 	struct vdec_prog *self = userdata;
 	int res = au_end(userdata);
 	if (res < 0) {
@@ -810,6 +821,9 @@ static void h264_nalu_end_cb(struct h264_ctx *ctx,
 			     const struct h264_nalu_header *nh,
 			     void *userdata)
 {
+	UNUSED(ctx);
+	UNUSED(nh);
+
 	nalu_end(userdata, (union nalu_type){.h264 = type}, buf, len);
 }
 
@@ -821,6 +835,9 @@ static void h265_nalu_end_cb(struct h265_ctx *ctx,
 			     const struct h265_nalu_header *nh,
 			     void *userdata)
 {
+	UNUSED(ctx);
+	UNUSED(nh);
+
 	nalu_end(userdata, (union nalu_type){.h265 = type}, buf, len);
 }
 
@@ -839,7 +856,7 @@ static const struct h265_ctx_cbs h265_cbs = {
 
 static int compute_psnr(struct vdec_prog *self,
 			struct mbuf_raw_video_frame *frame,
-			struct vdef_raw_frame *info,
+			const struct vdef_raw_frame *info,
 			double psnr[4])
 {
 	int res;
@@ -1058,7 +1075,9 @@ static int frame_output(struct vdec_prog *self,
 {
 	int res = 0;
 	double psnr[4] = {0};
-	uint64_t input_time, dequeue_time, output_time;
+	uint64_t input_time;
+	uint64_t dequeue_time;
+	uint64_t output_time;
 	struct vdef_raw_frame info;
 
 	res = yuv_output(self, out_frame);
@@ -1099,6 +1118,8 @@ static void frame_output_cb(struct vdec_decoder *dec,
 			    struct mbuf_raw_video_frame *out_frame,
 			    void *userdata)
 {
+	UNUSED(dec);
+
 	int res;
 	struct vdec_prog *self = userdata;
 
@@ -1168,6 +1189,8 @@ static void frame_output_cb(struct vdec_decoder *dec,
 
 static void flush_cb(struct vdec_decoder *dec, void *userdata)
 {
+	UNUSED(dec);
+
 	int res;
 	struct vdec_prog *self = userdata;
 
@@ -1184,6 +1207,8 @@ static void flush_cb(struct vdec_decoder *dec, void *userdata)
 
 static void stop_cb(struct vdec_decoder *dec, void *userdata)
 {
+	UNUSED(dec);
+
 	struct vdec_prog *self = userdata;
 
 	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
@@ -1212,14 +1237,14 @@ static void finish_idle(void *userdata)
 	if (self->finishing)
 		return;
 
-	if ((s_stopping) || (self->input_finished)) {
+	if (s_stopping || (self->input_finished)) {
 		self->finishing = 1;
 
 		/* Stop the parser */
 		stop_reader(self);
 
 		/* Flush the decoder */
-		res = vdec_flush(self->decoder, (s_stopping) ? 1 : 0);
+		res = vdec_flush(self->decoder, s_stopping ? 1 : 0);
 		if (res < 0)
 			ULOG_ERRNO("vdec_flush", -res);
 	}
@@ -1389,8 +1414,11 @@ static void au_parse_idle(void *userdata)
 
 static void queue_timer_cb(struct pomp_timer *timer, void *userdata)
 {
+	UNUSED(timer);
+
 	struct vdec_prog *self = userdata;
-	int res, err;
+	int res;
+	int err;
 	struct mbuf_coded_video_frame *in_frame = NULL;
 
 	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
@@ -1542,11 +1570,14 @@ static int is_suffix(const char *suffix, const char *s)
 
 int main(int argc, char **argv)
 {
-	int res = 0, status = EXIT_SUCCESS;
-	int idx, c;
+	int res = 0;
+	int status = EXIT_SUCCESS;
+	int idx;
+	int c;
 	struct vdec_prog *self = NULL;
 	struct timespec cur_ts = {0, 0};
-	uint64_t start_time = 0, end_time = 0;
+	uint64_t start_time = 0;
+	uint64_t end_time = 0;
 	double bitrate = 0.;
 	long int num = 0;
 	long int den = 0;
@@ -1945,9 +1976,9 @@ int main(int argc, char **argv)
 	if ((self->framerate.num != 0) && (self->framerate.den != 0) &&
 	    (self->total_bytes > 0) && (self->output_count > 0) &&
 	    (self->input_count == self->output_count)) {
-		double bitrate_scaled = bitrate =
-			(double)self->total_bytes * 8 / self->output_count *
-			self->framerate.num / self->framerate.den;
+		bitrate = (double)self->total_bytes * 8 / self->output_count *
+			  self->framerate.num / self->framerate.den;
+		double bitrate_scaled = bitrate;
 		char *bitrate_str = "";
 		if (bitrate_scaled > 1000.) {
 			bitrate_scaled /= 1000.;

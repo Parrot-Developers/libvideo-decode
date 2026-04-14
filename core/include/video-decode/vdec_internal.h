@@ -119,6 +119,9 @@ extern "C" {
 	} while (0)
 
 
+#define UNUSED(x) (void)(x)
+
+
 struct vdec_ops {
 	int (*get_supported_input_formats)(
 		const struct vdef_coded_format **formats);
@@ -245,7 +248,7 @@ vdec_format_convert(struct mbuf_coded_video_frame *frame,
 
 
 VDEC_INTERNAL_API bool vdec_is_sync_frame(struct mbuf_coded_video_frame *frame,
-					  struct vdef_coded_frame *info);
+					  const struct vdef_coded_frame *info);
 
 
 VDEC_INTERNAL_API void
@@ -319,12 +322,12 @@ VDEC_INTERNAL_API void vdec_default_input_filter_internal_confirm_frame(
 
 
 VDEC_INTERNAL_API bool vdec_h264_is_idr(struct mbuf_coded_video_frame *frame,
-					struct vdef_coded_frame *info);
+					const struct vdef_coded_frame *info);
 
 
 VDEC_INTERNAL_API
 int vdec_h264_write_grey_idr(struct vdec_decoder *self,
-			     struct vdef_coded_frame *in_frame_info,
+			     const struct vdef_coded_frame *in_frame_info,
 			     uint64_t *delta,
 			     uint64_t *timestamp,
 			     struct mbuf_mem *idr_mem,
@@ -332,7 +335,7 @@ int vdec_h264_write_grey_idr(struct vdec_decoder *self,
 
 
 VDEC_INTERNAL_API bool vdec_h265_is_idr(struct mbuf_coded_video_frame *frame,
-					struct vdef_coded_frame *info);
+					const struct vdef_coded_frame *info);
 
 
 VDEC_INTERNAL_API int vdec_dbg_create_files(struct vdec_decoder *vdec);

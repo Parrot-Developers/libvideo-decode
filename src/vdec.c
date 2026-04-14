@@ -76,20 +76,27 @@ static void add_supported_formats(const struct vdef_coded_format *formats,
 				  int count)
 {
 	for (int i = 0; i < count; i++) {
+		if (supported_format_count >= MAX_NB_SUPPORTED_FORMATS) {
+			ULOGE("too many supported formats (max=%u)",
+			      MAX_NB_SUPPORTED_FORMATS);
+			return;
+		}
 		bool found = false;
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunreachable-code"
 		/* coverity[unreachable] */
 		for (unsigned int j = 0; j < supported_format_count; j++) {
 			if (vdef_coded_format_cmp(&formats[i],
-						  &supported_formats[j]))
+						  &supported_formats[j])) {
 				found = true;
-			break;
+				break;
+			}
 		}
 #pragma GCC diagnostic pop
-		if (found)
-			continue;
-		supported_formats[supported_format_count++] = formats[i];
+		if (!found) {
+			supported_formats[supported_format_count] = formats[i];
+			supported_format_count++;
+		}
 	}
 }
 
@@ -232,8 +239,9 @@ static int vdec_get_implem(enum vdec_decoder_implem *implem)
 }
 
 
-static void
-log_video_info(struct vdec_decoder *self, struct video_info *info, int level)
+static void log_video_info(const struct vdec_decoder *self,
+			   const struct video_info *info,
+			   int level)
 {
 	/* Log photo/video info */
 	VDEC_LOG_INT(level,
@@ -322,9 +330,10 @@ enum vdec_decoder_implem vdec_get_auto_implem(void)
 
 
 enum vdec_decoder_implem
-vdec_get_auto_implem_by_coded_format(struct vdef_coded_format *format)
+vdec_get_auto_implem_by_coded_format(const struct vdef_coded_format *format)
 {
-	int res = 0, count;
+	int res = 0;
+	int count;
 	const struct vdef_coded_format *supported_input_formats;
 
 	ULOG_ERRNO_RETURN_VAL_IF(
@@ -433,7 +442,8 @@ int vdec_new(struct pomp_loop *loop,
 	     void *userdata,
 	     struct vdec_decoder **ret_obj)
 {
-	int ret, dbgret;
+	int ret;
+	int dbgret;
 	struct vdec_decoder *self = NULL;
 	const char *env_low_delay;
 	const char *env_preferred_thread_count;
@@ -557,7 +567,8 @@ int vdec_stop(struct vdec_decoder *self)
 
 int vdec_destroy(struct vdec_decoder *self)
 {
-	int ret = 0, dbgret;
+	int ret = 0;
+	int dbgret;
 
 	if (self == NULL)
 		return 0;
@@ -609,7 +620,8 @@ int vdec_destroy(struct vdec_decoder *self)
 int vdec_set_jpeg_params(struct vdec_decoder *self,
 			 const struct vdef_format_info *format_info)
 {
-	int ret = 0, count;
+	int ret = 0;
+	int count;
 	const struct vdef_coded_format *supported_input_formats;
 
 	VDEC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
@@ -684,7 +696,8 @@ int vdec_set_h264_ps(struct vdec_decoder *self,
 		     size_t pps_size,
 		     const struct vdef_coded_format *format)
 {
-	int ret, count;
+	int ret;
+	int count;
 
 	VDEC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
 	VDEC_LOG_ERRNO_RETURN_ERR_IF(format == NULL, EINVAL);
@@ -696,7 +709,8 @@ int vdec_set_h264_ps(struct vdec_decoder *self,
 	size_t offset = (format->data_format == VDEF_CODED_DATA_FORMAT_RAW_NALU)
 				? 0
 				: 4;
-	size_t size = 0, off = 0;
+	size_t size = 0;
+	size_t off = 0;
 	uint8_t start_code[] = {0, 0, 0, 1};
 	struct h264_info info = {0};
 	struct h264_ctx *ctx = h264_reader_get_ctx(self->reader.h264);
@@ -858,7 +872,8 @@ int vdec_set_h265_ps(struct vdec_decoder *self,
 		     size_t pps_size,
 		     const struct vdef_coded_format *format)
 {
-	int ret, count;
+	int ret;
+	int count;
 
 	VDEC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
 	VDEC_LOG_ERRNO_RETURN_ERR_IF(format == NULL, EINVAL);
@@ -870,7 +885,8 @@ int vdec_set_h265_ps(struct vdec_decoder *self,
 	size_t offset = (format->data_format == VDEF_CODED_DATA_FORMAT_RAW_NALU)
 				? 0
 				: 4;
-	size_t size = 0, off = 0;
+	size_t size = 0;
+	size_t off = 0;
 	uint8_t start_code[] = {0, 0, 0, 1};
 	struct h265_info info = {0};
 	struct h265_ctx *ctx = h265_reader_get_ctx(self->reader.h265);
@@ -1069,7 +1085,7 @@ vdec_get_input_buffer_queue(struct vdec_decoder *self)
 }
 
 
-int vdec_get_video_dimensions(struct vdec_decoder *self,
+int vdec_get_video_dimensions(const struct vdec_decoder *self,
 			      unsigned int *width,
 			      unsigned int *height,
 			      unsigned int *sar_width,
@@ -1107,7 +1123,7 @@ int vdec_get_video_dimensions(struct vdec_decoder *self,
 }
 
 
-enum vdec_decoder_implem vdec_get_used_implem(struct vdec_decoder *self)
+enum vdec_decoder_implem vdec_get_used_implem(const struct vdec_decoder *self)
 {
 	VDEC_LOG_ERRNO_RETURN_VAL_IF(
 		self == NULL, EINVAL, VDEC_DECODER_IMPLEM_AUTO);

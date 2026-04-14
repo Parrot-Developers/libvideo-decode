@@ -29,7 +29,7 @@
 
 
 bool vdec_h264_is_idr(struct mbuf_coded_video_frame *frame,
-		      struct vdef_coded_frame *info)
+		      const struct vdef_coded_frame *info)
 {
 	int err = 0;
 	int nalu_count;
@@ -81,7 +81,7 @@ bool vdec_h264_is_idr(struct mbuf_coded_video_frame *frame,
 
 
 int vdec_h264_write_grey_idr(struct vdec_decoder *self,
-			     struct vdef_coded_frame *in_frame_info,
+			     const struct vdef_coded_frame *in_frame_info,
 			     uint64_t *delta,
 			     uint64_t *timestamp,
 			     struct mbuf_mem *idr_mem,
@@ -89,7 +89,8 @@ int vdec_h264_write_grey_idr(struct vdec_decoder *self,
 {
 	int ret;
 	struct h264_slice_header *sh = NULL;
-	uint32_t mb_total, sc;
+	uint32_t mb_total;
+	uint32_t sc;
 	struct h264_bitstream bs;
 	struct h264_ctx *ctx = h264_reader_get_ctx(self->reader.h264);
 	uint8_t *data;
@@ -226,11 +227,9 @@ int vdec_h264_write_grey_idr(struct vdec_decoder *self,
 	}
 
 out:
-	if (ret != 0) {
-		if (*idr_frame != NULL) {
-			mbuf_coded_video_frame_unref(*idr_frame);
-			*idr_frame = NULL;
-		}
+	if ((ret != 0) && (*idr_frame != NULL)) {
+		mbuf_coded_video_frame_unref(*idr_frame);
+		*idr_frame = NULL;
 	}
 	free(sh);
 	return ret;

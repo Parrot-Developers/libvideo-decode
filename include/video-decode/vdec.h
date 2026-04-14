@@ -98,7 +98,7 @@ VDEC_API enum vdec_decoder_implem vdec_get_auto_implem(void);
  * error
  */
 VDEC_API enum vdec_decoder_implem
-vdec_get_auto_implem_by_coded_format(struct vdef_coded_format *format);
+vdec_get_auto_implem_by_coded_format(const struct vdef_coded_format *format);
 
 /**
  * Create a decoder instance.
@@ -266,7 +266,7 @@ vdec_get_input_buffer_queue(struct vdec_decoder *self);
  * @param crop_height: video crop height (output, optional, can be null)
  * @return 0 on success, negative errno value in case of error
  */
-VDEC_API int vdec_get_video_dimensions(struct vdec_decoder *self,
+VDEC_API int vdec_get_video_dimensions(const struct vdec_decoder *self,
 				       unsigned int *width,
 				       unsigned int *height,
 				       unsigned int *sar_width,
@@ -284,7 +284,7 @@ VDEC_API int vdec_get_video_dimensions(struct vdec_decoder *self,
  * in case of error
  */
 VDEC_API enum vdec_decoder_implem
-vdec_get_used_implem(struct vdec_decoder *self);
+vdec_get_used_implem(const struct vdec_decoder *self);
 
 
 #ifdef __cplusplus

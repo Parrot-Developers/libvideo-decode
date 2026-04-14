@@ -29,7 +29,7 @@
 
 
 bool vdec_h265_is_idr(struct mbuf_coded_video_frame *frame,
-		      struct vdef_coded_frame *info)
+		      const struct vdef_coded_frame *info)
 {
 	int err = 0;
 	int nalu_count;
