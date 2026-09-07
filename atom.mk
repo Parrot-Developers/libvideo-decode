@@ -209,3 +209,42 @@ endif
 
 
 include $(BUILD_EXECUTABLE)
+
+
+ifdef TARGET_TEST
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := tst-libvideo-decode
+LOCAL_CFLAGS := -DTARGET_TEST -D_GNU_SOURCE
+ifeq ("$(CONFIG_VDEC_FFMPEG)","y")
+LOCAL_CFLAGS += -DBUILD_LIBVIDEO_DECODE_FFMPEG
+endif
+ifeq ("$(CONFIG_VDEC_TURBOJPEG)","y")
+LOCAL_CFLAGS += -DBUILD_LIBVIDEO_DECODE_TURBOJPEG
+endif
+LOCAL_SRC_FILES := \
+	tests/vdec_test.c \
+	tests/vdec_test_core.c \
+	tests/vdec_test_dbg.c \
+	tests/vdec_test_format.c \
+	tests/vdec_test_h264.c \
+	tests/vdec_test_h265.c \
+	tests/vdec_test_config.c \
+	tests/vdec_test_lifecycle.c
+LOCAL_LIBRARIES := \
+	libcunit \
+	libvideo-decode \
+	libvideo-decode-core \
+	libh264 \
+	libh265 \
+	libjpeg-parrot \
+	libpomp \
+	libulog \
+	libvideo-defs \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libvideo-metadata
+include $(BUILD_EXECUTABLE)
+
+endif

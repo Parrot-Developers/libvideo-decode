@@ -493,17 +493,18 @@ int vdec_new(struct pomp_loop *loop,
 
 	/* Override debug config with environment if set */
 	if (env_low_delay != NULL)
-		self->config.low_delay = strtol(env_low_delay, NULL, 0);
+		self->config.low_delay = (int)strtol(env_low_delay, NULL, 0);
 	if (env_preferred_thread_count != NULL) {
-		self->config.preferred_thread_count =
-			strtol(env_preferred_thread_count, NULL, 0);
+		self->config.preferred_thread_count = (unsigned int)strtol(
+			env_preferred_thread_count, NULL, 0);
 	}
 	if (env_dbg_dir != NULL)
 		self->config.dbg_dir = strdup(env_dbg_dir);
 	else
 		self->config.dbg_dir = xstrdup(config->dbg_dir);
 	if (env_dbg_flags != NULL)
-		self->config.dbg_flags = strtol(env_dbg_flags, NULL, 0);
+		self->config.dbg_flags =
+			(uint32_t)strtol(env_dbg_flags, NULL, 0);
 
 	ret = vdec_get_implem(&self->config.implem);
 	if (ret < 0)
@@ -652,7 +653,7 @@ int vdec_set_jpeg_params(struct vdec_decoder *self,
 	self->video_info = (const struct video_info){
 		.resolution = {format_info->resolution.width,
 			       format_info->resolution.height},
-		.bit_depth = format_info->bit_depth,
+		.bit_depth = (uint8_t)format_info->bit_depth,
 		.sar = format_info->sar,
 		.crop = {0,
 			 0,
@@ -713,13 +714,15 @@ int vdec_set_h264_ps(struct vdec_decoder *self,
 	size_t off = 0;
 	uint8_t start_code[] = {0, 0, 0, 1};
 	struct h264_info info = {0};
-	struct h264_ctx *ctx = h264_reader_get_ctx(self->reader.h264);
+	const struct h264_ctx *ctx = h264_reader_get_ctx(self->reader.h264);
 	const struct vdef_coded_format *supported_input_formats;
 	uint32_t sc;
 
-	VDEC_LOG_ERRNO_RETURN_ERR_IF((sps == NULL) || (sps_size <= offset),
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((sps == NULL) || (sps_size <= offset) ||
+					     (sps_size - offset > UINT32_MAX),
 				     EINVAL);
-	VDEC_LOG_ERRNO_RETURN_ERR_IF((pps == NULL) || (pps_size <= offset),
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((pps == NULL) || (pps_size <= offset) ||
+					     (pps_size - offset > UINT32_MAX),
 				     EINVAL);
 	VDEC_LOG_ERRNO_RETURN_ERR_IF(self->configured, EALREADY);
 
@@ -815,9 +818,9 @@ int vdec_set_h264_ps(struct vdec_decoder *self,
 					   &vdef_h264_avcc,
 					   supported_input_formats,
 					   count)) {
-				sc = htonl(sps_size - offset);
+				sc = htonl((uint32_t)(sps_size - offset));
 				memcpy(data, &sc, sizeof(sc));
-				sc = htonl(pps_size - offset);
+				sc = htonl((uint32_t)(pps_size - offset));
 				memcpy(&data[4 + sps_size - offset],
 				       &sc,
 				       sizeof(sc));
@@ -889,15 +892,18 @@ int vdec_set_h265_ps(struct vdec_decoder *self,
 	size_t off = 0;
 	uint8_t start_code[] = {0, 0, 0, 1};
 	struct h265_info info = {0};
-	struct h265_ctx *ctx = h265_reader_get_ctx(self->reader.h265);
+	const struct h265_ctx *ctx = h265_reader_get_ctx(self->reader.h265);
 	const struct vdef_coded_format *supported_input_formats;
 	uint32_t sc;
 
-	VDEC_LOG_ERRNO_RETURN_ERR_IF((vps == NULL) || (vps_size <= offset),
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((vps == NULL) || (vps_size <= offset) ||
+					     (vps_size - offset > UINT32_MAX),
 				     EINVAL);
-	VDEC_LOG_ERRNO_RETURN_ERR_IF((sps == NULL) || (sps_size <= offset),
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((sps == NULL) || (sps_size <= offset) ||
+					     (sps_size - offset > UINT32_MAX),
 				     EINVAL);
-	VDEC_LOG_ERRNO_RETURN_ERR_IF((pps == NULL) || (pps_size <= offset),
+	VDEC_LOG_ERRNO_RETURN_ERR_IF((pps == NULL) || (pps_size <= offset) ||
+					     (pps_size - offset > UINT32_MAX),
 				     EINVAL);
 	VDEC_LOG_ERRNO_RETURN_ERR_IF(self->configured, EALREADY);
 
@@ -1011,13 +1017,13 @@ int vdec_set_h265_ps(struct vdec_decoder *self,
 					 &vdef_h265_hvcc,
 					 supported_input_formats,
 					 count)) {
-				sc = htonl(vps_size - offset);
+				sc = htonl((uint32_t)(vps_size - offset));
 				memcpy(data, &sc, sizeof(sc));
-				sc = htonl(sps_size - offset);
+				sc = htonl((uint32_t)(sps_size - offset));
 				memcpy(&data[4 + vps_size - offset],
 				       &sc,
 				       sizeof(sc));
-				sc = htonl(pps_size - offset);
+				sc = htonl((uint32_t)(pps_size - offset));
 				memcpy(&data[8 + vps_size - offset + sps_size -
 					     offset],
 				       &sc,

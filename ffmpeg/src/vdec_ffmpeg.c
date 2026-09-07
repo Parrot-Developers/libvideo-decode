@@ -337,7 +337,11 @@ vdec_ffmpeg_set_frame_metadata(struct vdec_ffmpeg *self,
 	struct vdef_coded_frame in_info;
 	const struct vdef_raw_format *fmt;
 
-	if (self->hw_device_ctx != NULL) {
+	if (frame->hw_frames_ctx != NULL) {
+		/* Checked per-frame, not via self->hw_device_ctx: hwaccel
+		 * setup can fail for a given stream (e.g. resolution below
+		 * the HW decoder's minimum) while avcodec_receive_frame()
+		 * still returns success with no hw_frames_ctx set. */
 		/* HW decoding: transfer frame from GPU */
 		AVFrame *sw_frame = av_frame_alloc();
 		if (sw_frame == NULL) {
@@ -983,10 +987,11 @@ static int vdec_ffmpeg_buffer_pop_all(struct vdec_ffmpeg *self)
 			break;
 
 		if (avcodec_ret < 0) {
-			/* Decoding error,
-			 * unref the input buffer */
+			/* Decoding error, unref the input buffer */
 			ret = avcodec_ret;
 			VDEC_LOG_ERRNO("avcodec_receive_frame", -avcodec_ret);
+			release_decoder_frame(in_frame);
+			in_frame = NULL;
 			break;
 		}
 

@@ -402,12 +402,20 @@ out:
 		mbuf_mem_unref(out_mem);
 
 	if (in_data) {
-		ret = mbuf_coded_video_frame_release_packed_buffer(in_frame,
-								   in_data);
-		if (ret < 0)
+		/* Uses a dedicated variable rather than reassigning ret: this
+		 * cleanup runs on every path through this label, including
+		 * ones that jumped here with ret already set to a real
+		 * decode error (e.g. tjDecompressToYUVPlanes() failing) -
+		 * overwriting ret with this call's own (almost always 0)
+		 * result silently turned every such error into a false
+		 * success, suppressing the dec_error_evt notification below
+		 * entirely. */
+		int release_ret = mbuf_coded_video_frame_release_packed_buffer(
+			in_frame, in_data);
+		if (release_ret < 0)
 			VDEC_LOG_ERRNO(
 				"mbuf_coded_video_frame_release_packed_buffer",
-				-ret);
+				-release_ret);
 	}
 
 	if (metadata)

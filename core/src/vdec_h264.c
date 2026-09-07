@@ -92,7 +92,7 @@ int vdec_h264_write_grey_idr(struct vdec_decoder *self,
 	uint32_t mb_total;
 	uint32_t sc;
 	struct h264_bitstream bs;
-	struct h264_ctx *ctx = h264_reader_get_ctx(self->reader.h264);
+	struct h264_ctx *ctx;
 	uint8_t *data;
 	size_t size = 0;
 	struct vdef_coded_frame idr_frame_info;
@@ -104,6 +104,8 @@ int vdec_h264_write_grey_idr(struct vdec_decoder *self,
 	ULOG_ERRNO_RETURN_ERR_IF(timestamp == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(idr_mem == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(idr_frame == NULL, EINVAL);
+
+	ctx = h264_reader_get_ctx(self->reader.h264);
 
 	*idr_frame = NULL;
 
